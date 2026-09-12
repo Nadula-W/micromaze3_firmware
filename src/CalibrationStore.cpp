@@ -1,4 +1,5 @@
 #include "CalibrationStore.h"
+#include <stddef.h>
 
 namespace MM3 {
 
@@ -6,14 +7,15 @@ bool CalibrationStore::load(CalibrationData &out) {
   Preferences prefs;
   if (!prefs.begin("mm3cal", true)) return false;
   size_t n = prefs.getBytesLength("data");
-  if (n != sizeof(CalibrationData)) {
+  // Legacy v3 records end before the appended front-alignment gains.
+  if (n != sizeof(CalibrationData) && n != offsetof(CalibrationData, frontKp)) {
     prefs.end();
     return false;
   }
   CalibrationData tmp;
-  size_t got = prefs.getBytes("data", &tmp, sizeof(tmp));
+  size_t got = prefs.getBytes("data", &tmp, n);
   prefs.end();
-  if (got != sizeof(tmp) || tmp.magic != CAL_MAGIC || tmp.version != CAL_VERSION) {
+  if (got != n || tmp.magic != CAL_MAGIC || tmp.version != CAL_VERSION) {
     return false;
   }
   out = tmp;

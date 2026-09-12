@@ -5,20 +5,6 @@
 
 namespace MM3 {
 
-// v36: side opening evidence collected continuously while entering a cell.
-// We do not compare against an OPEN calibration value. A reading is either
-// CLOSE (wall) or NOT-CLOSE. Three consecutive fresh NOT-CLOSE samples latch
-// an opening for the destination cell.
-enum class SideObservation : uint8_t { Unknown = 0, Wall = 1, Open = 2 };
-
-struct MoveSideObservation {
-  SideObservation left = SideObservation::Unknown;
-  SideObservation right = SideObservation::Unknown;
-  uint8_t leftNoCloseStreak = 0;
-  uint8_t rightNoCloseStreak = 0;
-  bool valid = false;
-};
-
 using KillCheckFn = bool (*)();
 
 class MotionController {
@@ -71,9 +57,6 @@ public:
   uint16_t distanceFront() const;
   uint16_t distanceRight() const;
 
-  const MoveSideObservation &lastMoveSideObservation() const { return _lastMoveSideObs; }
-  void clearLastMoveSideObservation() { _lastMoveSideObs = MoveSideObservation{}; }
-
   void emergencyStop() { _motors.stop(true); }
 
 private:
@@ -87,11 +70,10 @@ private:
   int32_t _mazeAnchorLeftTicks = 0;
   int32_t _mazeAnchorRightTicks = 0;
   uint16_t _mazeAnchorCells = 0;
-  MoveSideObservation _lastMoveSideObs;
 
   bool killed() const { return _kill && _kill(); }
   bool wallByIndex(uint8_t index) const;
-  int wallSteeringCorrection(const SensorSnapshot &s) const;
+  float wallSteeringErrorMm(const SensorSnapshot &s) const;
 };
 
 } // namespace MM3

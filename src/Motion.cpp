@@ -44,24 +44,26 @@ uint16_t MotionController::distanceFront() const {
   return (uint16_t)((a + b) / 2u);
 }
 
-int MotionController::wallSteeringCorrection(const SensorSnapshot &s) const {
+float MotionController::wallSteeringErrorMm(const SensorSnapshot &s) const {
   const uint8_t li = SensorMap::LEFT;
   const uint8_t ri = SensorMap::RIGHT;
   bool lwall = s.valid[li] && s.mm[li] < _cal.wallThresholdMm[li];
   bool rwall = s.valid[ri] && s.mm[ri] < _cal.wallThresholdMm[ri];
-  float steer = 0.0f;
 
+  // RAW centering error only. There is no separate wall gain anymore.
+  // Positive error means steer left (left wheel slower, right wheel faster).
   if (lwall && rwall && _cal.sideTargetLeftMm && _cal.sideTargetRightMm) {
-    // Positive steer turns left: left wheel slower, right wheel faster.
     float lErr = (float)s.mm[li] - _cal.sideTargetLeftMm;
     float rErr = (float)s.mm[ri] - _cal.sideTargetRightMm;
-    steer = _cal.wallKp * (lErr - rErr) * 0.5f;
-  } else if (lwall && _cal.sideTargetLeftMm) {
-    steer = _cal.wallKp * ((float)s.mm[li] - _cal.sideTargetLeftMm);
-  } else if (rwall && _cal.sideTargetRightMm) {
-    steer = -_cal.wallKp * ((float)s.mm[ri] - _cal.sideTargetRightMm);
+    return (lErr - rErr) * 0.5f;
   }
-  return constrain((int)lroundf(steer), -65, 65);
+  if (lwall && _cal.sideTargetLeftMm) {
+    return (float)s.mm[li] - _cal.sideTargetLeftMm;
+  }
+  if (rwall && _cal.sideTargetRightMm) {
+    return -((float)s.mm[ri] - _cal.sideTargetRightMm);
+  }
+  return 0.0f;
 }
 
 bool MotionController::driveDistanceMm(float distanceMm, int basePwm, bool useWallCentering,
@@ -75,10 +77,6 @@ bool MotionController::driveDistanceMm(float distanceMm, int basePwm, bool useWa
   const int direction = distanceMm >= 0 ? +1 : -1;
   const float target = fabsf(distanceMm);
   basePwm = constrain(abs(basePwm), MIN_MOVE_PWM, PWM_MAX);
-
-  // v36: continuous side CLOSE/NOT-CLOSE tracking for the destination cell.
-  _lastMoveSideObs = MoveSideObservation{};
-  uint32_t lastSideObsStamp = 0;
 
   int32_t startL = _motors.leftTicks();
   int32_t startR = _motors.rightTicks();
@@ -106,6 +104,11 @@ bool MotionController::driveDistanceMm(float distanceMm, int basePwm, bool useWa
   float latticeTargetFrontMm = -1.0f;
   uint32_t latticeLastValidMs = 0;
   uint8_t latticeStopSamples = 0;
+
+  // One PID controller only. `pid Kp Ki Kd` controls these terms directly.
+  float pidIntegral = 0.0f;
+  float pidPrevError = 0.0f;
+  bool pidHasPrev = false;
 
   while (!killed() && millis() - startMs < timeoutMs) {
     int32_t dL = _motors.leftTicks() - startL;
@@ -139,9 +142,11 @@ bool MotionController::driveDistanceMm(float distanceMm, int basePwm, bool useWa
       continue;
     }
 
-    // Encoder synchronization: if left is farther ahead, slow left / speed right.
+    // Encoder synchronization error. If side-wall centering is available, its
+    // raw error is added below. ONE Kp/Ki/Kd controller handles the result.
     float syncErrMm = leftMm - rightMm;
-    int correction = constrain((int)lroundf(_cal.straightKp * syncErrMm), -55, 55);
+    float driveErrorMm = syncErrMm;
+    int correction = 0;
 
     bool frontCandidate = false;
     bool frontReferenceActive = false;
@@ -149,30 +154,7 @@ bool MotionController::driveDistanceMm(float distanceMm, int basePwm, bool useWa
 
     if (direction > 0 && useWallCentering) {
       SensorSnapshot s = _sensors.snapshot();
-      correction += wallSteeringCorrection(s);
-
-      // v36 CONTINUOUS SIDE OPENING CONFIRMATION.
-      // Only CLOSE is calibrated. During the latter half of the move, any fresh
-      // sample that is not CLOSE increments a consecutive streak. One CLOSE
-      // sample resets that streak. Three consecutive NOT-CLOSE samples latch
-      // OPEN for that side of the destination cell.
-      if (s.stampMs != lastSideObsStamp &&
-          avgMm >= target * SIDE_OBS_WINDOW_START_FRAC &&
-          avgMm <= target * SIDE_OBS_WINDOW_END_FRAC) {
-        lastSideObsStamp = s.stampMs;
-        auto observeSide = [&](uint8_t idx, uint8_t &streak, SideObservation &state) {
-          const bool closeNow = s.valid[idx] && s.mm[idx] < _cal.wallThresholdMm[idx];
-          if (closeNow) {
-            streak = 0;
-            if (state != SideObservation::Open) state = SideObservation::Wall;
-          } else {
-            if (streak < 250) ++streak;
-            if (streak >= SIDE_OPEN_CONFIRM_SAMPLES) state = SideObservation::Open;
-          }
-        };
-        observeSide(SensorMap::LEFT, _lastMoveSideObs.leftNoCloseStreak, _lastMoveSideObs.left);
-        observeSide(SensorMap::RIGHT, _lastMoveSideObs.rightNoCloseStreak, _lastMoveSideObs.right);
-      }
+      driveErrorMm += wallSteeringErrorMm(s);
 
       // Strong side-wall escape if the chassis is already too close.
       const uint8_t sli = SensorMap::LEFT;
@@ -185,7 +167,6 @@ bool MotionController::driveDistanceMm(float distanceMm, int basePwm, bool useWa
           s.mm[sri] + SIDE_HARD_MARGIN_MM < _cal.sideTargetRightMm) {
         correction += SIDE_ESCAPE_BOOST;
       }
-      correction = constrain(correction, -78, 78);
 
       // CONTINUOUS front-wall tracking.  Do not stop merely because the encoder
       // says 192 mm if a real front wall is already visible.  In that situation
@@ -308,6 +289,19 @@ bool MotionController::driveDistanceMm(float distanceMm, int basePwm, bool useWa
       }
     }
 
+    // True discrete PID steering. This is the ONLY normal steering gain path.
+    // P = current error, I = accumulated error, D = change in error.
+    pidIntegral += driveErrorMm;
+    pidIntegral = constrain(pidIntegral, -250.0f, 250.0f);
+    float pidDerivative = pidHasPrev ? (driveErrorMm - pidPrevError) : 0.0f;
+    float pidOutput = _cal.pidKp * driveErrorMm +
+                      _cal.pidKi * pidIntegral +
+                      _cal.pidKd * pidDerivative;
+    correction += constrain((int)lroundf(pidOutput), -55, 55);
+    correction = constrain(correction, -78, 78);
+    pidPrevError = driveErrorMm;
+    pidHasPrev = true;
+
     const bool encoderDone =
         avgMm >= target && leftMm >= target * 0.94f && rightMm >= target * 0.94f;
 
@@ -376,17 +370,6 @@ bool MotionController::driveDistanceMm(float distanceMm, int basePwm, bool useWa
   }
 
   _motors.stop(true);
-
-  // If no 3-sample opening was latched, treat the side as a wall for safety.
-  // Mapping code can still re-check at rest before committing the cell walls.
-  if (direction > 0 && success && !killed()) {
-    if (_lastMoveSideObs.left == SideObservation::Unknown)
-      _lastMoveSideObs.left = SideObservation::Wall;
-    if (_lastMoveSideObs.right == SideObservation::Unknown)
-      _lastMoveSideObs.right = SideObservation::Wall;
-    _lastMoveSideObs.valid = true;
-  }
-
   return success && !killed();
 }
 
@@ -437,6 +420,9 @@ bool MotionController::driveAnchoredMazeCell(int basePwm, bool resetAnchor) {
   uint8_t frontCloseSamples = 0;
   bool requestFrontAlign = false;
   bool success = false;
+  float pidIntegral = 0.0f;
+  float pidPrevError = 0.0f;
+  bool pidHasPrev = false;
 
   while (!killed() && millis() - startMs < timeoutMs) {
     int32_t dLticks = _motors.leftTicks() - _mazeAnchorLeftTicks;
@@ -483,8 +469,16 @@ bool MotionController::driveAnchoredMazeCell(int basePwm, bool resetAnchor) {
     float syncLeftMm = fabsf((float)syncDLticks) / _cal.ticksPerMmLeft;
     float syncRightMm = fabsf((float)syncDRticks) / _cal.ticksPerMmRight;
     float syncErrMm = syncLeftMm - syncRightMm;
-    int correction = constrain((int)lroundf(_cal.straightKp * syncErrMm), -55, 55);
-    correction += wallSteeringCorrection(snap);
+    float driveErrorMm = syncErrMm + wallSteeringErrorMm(snap);
+    pidIntegral += driveErrorMm;
+    pidIntegral = constrain(pidIntegral, -250.0f, 250.0f);
+    float pidDerivative = pidHasPrev ? (driveErrorMm - pidPrevError) : 0.0f;
+    float pidOutput = _cal.pidKp * driveErrorMm +
+                      _cal.pidKi * pidIntegral +
+                      _cal.pidKd * pidDerivative;
+    int correction = constrain((int)lroundf(pidOutput), -55, 55);
+    pidPrevError = driveErrorMm;
+    pidHasPrev = true;
 
     const uint8_t sli = SensorMap::LEFT;
     const uint8_t sri = SensorMap::RIGHT;
@@ -635,7 +629,7 @@ bool MotionController::turnDegrees(float degrees, int maxPwm) {
       break;
     }
 
-    int cmd = (int)lroundf(MIN_MOVE_PWM + _cal.gyroTurnKp * remaining);
+    int cmd = (int)lroundf(MIN_MOVE_PWM + 1.2f * remaining);
     cmd = constrain(cmd, MIN_MOVE_PWM, maxPwm);
     if (remaining < 18.0f) cmd = min(cmd, MIN_MOVE_PWM + 12);
 
@@ -685,21 +679,64 @@ bool MotionController::alignFrontToWall(uint16_t targetMm, int maxPwm) {
   uint32_t startMs = millis();
   uint32_t stableSince = 0;
 
+  // Gains use seconds. Keep this PID independent of straight-drive calibration.
+  struct AlignPid {
+    float integral = 0.0f;
+    float previous = 0.0f;
+    float derivative = 0.0f;
+    bool initialized = false;
+
+    float update(float error, float dt, float kp, float ki, float kd, float limit) {
+      float slope = initialized ? (error - previous) / dt : 0.0f;
+      derivative += dt / (FRONT_ALIGN_D_FILTER_S + dt) * (slope - derivative);
+      // Discard accumulated drive when the error crosses the target.
+      if (initialized && error * previous < 0.0f) integral = 0.0f;
+      previous = error;
+      initialized = true;
+      float candidate = constrain(integral + ki * error * dt,
+                                  -FRONT_ALIGN_I_LIMIT_PWM, FRONT_ALIGN_I_LIMIT_PWM);
+      float output = kp * error + candidate + kd * derivative;
+      if (fabsf(output) <= limit || output * error < 0.0f) integral = candidate;
+      return constrain(kp * error + integral + kd * derivative, -limit, limit);
+    }
+  } distancePid, squarePid;
+  uint32_t lastControlMs = startMs;
+  float leftPulse = 0.0f;
+  float rightPulse = 0.0f;
+  int leftSign = 0;
+  int rightSign = 0;
+  uint8_t previousFrontMask = 0;
+
   Serial.print("FRONT ALIGN target=");
   Serial.print(targetMm);
   Serial.println(" mm");
 
-  while (!killed() && millis() - startMs < 2200u) {
+  while (!killed() && millis() - startMs < FRONT_ALIGN_TIMEOUT_MS) {
+    uint32_t now = millis();
+    if (now - lastControlMs < FRONT_ALIGN_CONTROL_MS) {
+      delay(1);
+      continue;
+    }
+    float dt = (now - lastControlMs) * 0.001f;
+    lastControlMs = now;
     SensorSnapshot s = _sensors.snapshot();
     const uint8_t li = SensorMap::FRONT_LEFT;
     const uint8_t ri = SensorMap::FRONT_RIGHT;
 
     bool lv = s.valid[li] && s.mm[li] < 8190;
     bool rv = s.valid[ri] && s.mm[ri] < 8190;
-    if (!lv && !rv) {
+    if ((!lv && !rv) || s.stampMs == 0 || now - s.stampMs > FRONT_ALIGN_STALE_MS) {
       _motors.stop(true);
-      Serial.println("FRONT ALIGN skipped: no valid front-wall reading.");
+      Serial.println("FRONT ALIGN failed: invalid or stale front-wall reading.");
       return false;
+    }
+
+    uint8_t frontMask = (lv ? 1 : 0) | (rv ? 2 : 0);
+    if (frontMask != previousFrontMask) {
+      distancePid = AlignPid{};
+      squarePid = AlignPid{};
+      stableSince = 0;
+      previousFrontMask = frontMask;
     }
 
     float left = lv ? (float)s.mm[li] : NAN;
@@ -713,6 +750,9 @@ bool MotionController::alignFrontToWall(uint16_t targetMm, int maxPwm) {
 
     if (distOk && squareOk) {
       _motors.stop(true);
+      distancePid = AlignPid{};
+      squarePid = AlignPid{};
+      leftPulse = rightPulse = 0.0f;
       if (stableSince == 0) stableSince = millis();
       if (millis() - stableSince >= 120u) {
         Serial.print("FRONT ALIGN OK: FL=");
@@ -723,48 +763,60 @@ bool MotionController::alignFrontToWall(uint16_t targetMm, int maxPwm) {
         Serial.println(front, 1);
         return true;
       }
-      delay(8);
       continue;
     }
     stableSince = 0;
 
     // Translation: positive when too far from the wall, negative when too close.
-    int drive = 0;
+    float drive = 0.0f;
     if (!distOk) {
-      int mag = (int)lroundf(FRONT_ALIGN_KP * fabsf(distErr));
-      mag = constrain(mag, MIN_MOVE_PWM, maxPwm);
-      drive = (distErr > 0.0f) ? mag : -mag;
-    }
+      drive = distancePid.update(distErr, dt, _cal.frontKp, _cal.frontKi,
+                                 _cal.frontKd, maxPwm);
+    } else distancePid = AlignPid{};
 
     // Squaring: if FL > FR, the right-front corner is closer and the nose is
     // rotated left; command a small RIGHT correction (negative turn).
-    int turn = 0;
+    float turn = 0.0f;
     if (!squareOk && lv && rv) {
-      turn = (int)lroundf(-FRONT_SQUARE_KP * squareErr);
-      turn = constrain(turn, -28, 28);
-      if (drive == 0 && turn != 0 && abs(turn) < MIN_MOVE_PWM) {
-        turn = (turn > 0) ? MIN_MOVE_PWM : -MIN_MOVE_PWM;
-      }
+      turn = -squarePid.update(squareErr, dt, _cal.squareKp, _cal.squareKi,
+                               _cal.squareKd, maxPwm);
+    } else squarePid = AlignPid{};
+
+    // Scale both wheels together to preserve the distance/squaring balance.
+    float leftDemand = drive - turn;
+    float rightDemand = drive + turn;
+    float peak = max(fabsf(leftDemand), fabsf(rightDemand));
+    if (peak > maxPwm) {
+      leftDemand *= maxPwm / peak;
+      rightDemand *= maxPwm / peak;
     }
 
-    int leftCmd = constrain(drive - turn, -maxPwm, maxPwm);
-    int rightCmd = constrain(drive + turn, -maxPwm, maxPwm);
-
-    // Ensure a commanded wheel is above the motor's useful dead-zone.
-    auto liftDeadzone = [](int v) {
-      if (v == 0) return 0;
-      if (abs(v) < MIN_MOVE_PWM) return v > 0 ? MIN_MOVE_PWM : -MIN_MOVE_PWM;
-      return v;
+    // Below motor breakaway PWM, alternate short drive/brake intervals rather
+    // than forcing every small error to continuous MIN_MOVE_PWM.
+    auto pulseCommand = [](float demand, float &accumulator, int &previousSign) {
+      int sign = demand > 0.0f ? 1 : (demand < 0.0f ? -1 : 0);
+      if (sign != previousSign) accumulator = 0.0f;
+      previousSign = sign;
+      float magnitude = fabsf(demand);
+      if (magnitude >= MIN_MOVE_PWM) {
+        accumulator = 0.0f;
+        return (int)lroundf(demand);
+      }
+      accumulator += magnitude;
+      if (accumulator >= MIN_MOVE_PWM) {
+        accumulator -= MIN_MOVE_PWM;
+        return sign * MIN_MOVE_PWM;
+      }
+      return 0;
     };
-    leftCmd = liftDeadzone(leftCmd);
-    rightCmd = liftDeadzone(rightCmd);
+    int leftCmd = pulseCommand(leftDemand, leftPulse, leftSign);
+    int rightCmd = pulseCommand(rightDemand, rightPulse, rightSign);
 
     _motors.setWheels(leftCmd, rightCmd);
-    delay(8);
   }
 
   _motors.stop(true);
-  Serial.println("FRONT ALIGN timeout.");
+  Serial.println(killed() ? "FRONT ALIGN stopped: Key2." : "FRONT ALIGN timeout: distance/squaring did not settle.");
   return false;
 }
 
@@ -776,52 +828,38 @@ bool MotionController::turnToHeading(Heading &current, Heading target, int maxPw
   const int delta = (t - c + 4) % 4;
   bool ok = true;
 
-  if (delta == 0) return true;
-
-  // v32d TURN PREPARATION:
-  // A repeatable 378-tick pivot is only a true 90-degree maze turn if the robot
-  // enters the pivot stationary and straight.  Always remove forward momentum
-  // before a turn.  If a front wall exists, use it as the strongest physical
-  // reference to correct both longitudinal position and yaw before pivoting.
-  _motors.stop(true);
-  delay(120);
-
-  if (wallFront()) {
-    Serial.println("TURN PREP: front wall -> align/square before pivot");
+  // Before any pivot, if there is a front wall, use it as a physical reference.
+  // This prevents the robot from entering the turn while touching the wall or
+  // while sitting several centimetres off the repeatable cell-centre position.
+  if (delta != 0 && wallFront()) {
     if (!alignFrontToWall(FRONT_TURN_TARGET_MM, FRONT_ALIGN_MAX_PWM)) {
       Serial.println("TURN BLOCKED: front-wall alignment failed.");
       _motors.stop(true);
       return false;
     }
     _motors.stop(true);
-    delay(160);
-  } else {
-    // With no front wall there is no absolute yaw reference available from the
-    // current sensor layout.  Do not invent a correction; simply let the robot
-    // fully settle so the calibrated encoder pivot starts from zero momentum.
-    Serial.println("TURN PREP: no front wall -> stationary settle");
+    delay(180);
   }
 
-  if (delta == 1) {
+  if (delta == 0) {
+    ok = true;
+  } else if (delta == 1) {
     // RIGHT 90 degrees.
     ok = turnEncoderTicks(-TURN_90_TICKS);
+    if (ok) delay(250);
   } else if (delta == 2) {
-    // 180 degrees: two independently stopped calibrated 90-degree pivots.
+    // 180 degrees: two fully stopped calibrated 90-degree pivots.
     ok = turnEncoderTicks(TURN_90_TICKS);
     if (ok) {
-      _motors.stop(true);
       delay(350);
       ok = turnEncoderTicks(TURN_90_TICKS);
     }
+    if (ok) delay(300);
   } else if (delta == 3) {
     // LEFT 90 degrees.
     ok = turnEncoderTicks(TURN_90_TICKS);
+    if (ok) delay(250);
   }
-
-  // Let the chassis settle before the next 192 mm cell move starts.  This avoids
-  // carrying rotational inertia into the following straight segment.
-  _motors.stop(true);
-  if (ok) delay(delta == 2 ? 300 : 200);
 
   if (ok) current = target;
   return ok;

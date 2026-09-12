@@ -56,10 +56,21 @@ struct CalibrationData {
   uint16_t sideTargetLeftMm = 0;
   uint16_t sideTargetRightMm = 0;
 
-  // Closed-loop tuning values. These are engineering starting points.
-  float straightKp = 2.6f;   // PWM correction per mm wheel-progress mismatch
-  float wallKp = 0.75f;      // PWM correction per mm side-distance error
-  float gyroTurnKp = 1.2f;   // extra turn PWM per degree remaining (clamped)
+  // Single drive-steering PID. The existing terminal command `pid a b c`
+  // now maps directly to Kp, Ki, Kd used by cell/DFS straight driving.
+  // The three floats remain in the same place in this struct, so all other
+  // saved calibration fields keep the same binary layout as v32.
+  float pidKp = 1.8f;
+  float pidKi = 0.0f;
+  float pidKd = 0.03f;
+
+  // Appended so existing calibration can load with default front gains.
+  float frontKp = FRONT_ALIGN_KP;
+  float frontKi = FRONT_ALIGN_KI;
+  float frontKd = FRONT_ALIGN_KD;
+  float squareKp = FRONT_SQUARE_KP;
+  float squareKi = FRONT_SQUARE_KI;
+  float squareKd = FRONT_SQUARE_KD;
 };
 
 struct StoredMaze {

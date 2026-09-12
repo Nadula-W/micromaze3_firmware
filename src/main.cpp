@@ -61,14 +61,6 @@ static void disableWirelessExplicitly() {
 
 void IRAM_ATTR ioInterruptISR() {
   gIoInterrupt = true;
-  // During any active function, an input change on the PCF8574 is treated as an
-  // emergency stop first. Key2 is the intended source. This satisfies the hardware
-  // document requirement that the kill function use interrupts and makes the stop
-  // independent of normal loop latency.
-  if (gRunActive) {
-    gKillRequested = true;
-    MotorSystem::emergencyStandbyOffFromISR();
-  }
 }
 
 static void serviceIoInterrupt() {

@@ -109,34 +109,9 @@ void MazeMap::senseCurrentCell(const Pose &pose, MotionController &motion) {
   setVisited(pose.x, pose.y, true);
   Heading left = turnLeft(pose.heading);
   Heading right = turnRight(pose.heading);
-
-  // v37: CLOSE-only classification, but do not let ONE bad low reading create
-  // a fake wall.  Take three fresh checks and require at least two CLOSE votes.
-  // No OPEN-distance average is used anywhere here.
-  auto confirmedWall = [&](uint8_t which) {
-    uint8_t closeVotes = 0;
-    for (uint8_t k = 0; k < 3; ++k) {
-      bool closeNow = false;
-      if (which == 0) closeNow = motion.wallLeft();
-      else if (which == 1) closeNow = motion.wallFront();
-      else closeNow = motion.wallRight();
-      if (closeNow) ++closeVotes;
-      delay(SENSOR_PERIOD_MS + 3);
-    }
-    return closeVotes >= 2;
-  };
-
-  const MoveSideObservation &obs = motion.lastMoveSideObservation();
-  // A side opening already confirmed continuously while entering the cell wins.
-  // Otherwise use the 2-of-3 CLOSE vote at rest.
-  bool wallL = (obs.valid && obs.left == SideObservation::Open) ? false : confirmedWall(0);
-  bool wallR = (obs.valid && obs.right == SideObservation::Open) ? false : confirmedWall(2);
-  bool wallF = confirmedWall(1);
-
-  setWall(pose.x, pose.y, left, wallL);
-  setWall(pose.x, pose.y, pose.heading, wallF);
-  setWall(pose.x, pose.y, right, wallR);
-  motion.clearLastMoveSideObservation();
+  setWall(pose.x, pose.y, left, motion.wallLeft());
+  setWall(pose.x, pose.y, pose.heading, motion.wallFront());
+  setWall(pose.x, pose.y, right, motion.wallRight());
 
   // The edge we arrived through is open. Only on the very first observation of
   // the start cell is the back direction the known third enclosing wall.
@@ -459,24 +434,17 @@ bool MazeNavigator::deadEndReturnTest(int pwm, Print &out) {
 
 bool MazeNavigator::homeDfsTest(int pwm, Print &out) {
   _motion.invalidateMazeSegmentAnchor();
-  _motion.clearLastMoveSideObservation();
   out.println("\n=== GENERIC HOME MAZE DFS TEST ===");
   out.println("Explores unknown branches, backtracks at dead ends, then returns to START.");
-  out.println("Use a closed cardboard maze. Start anywhere with the robot facing into the maze.");
+  out.println("Use a closed maze. Start at (0,0), facing North (+y), with the maze extending right (+x).");
+  out.print("Maze size: "); out.print(MAZE_N); out.print('x'); out.println(MAZE_N);
   out.print("Navigation: cell="); out.print(CELL_MM, 0); out.print(" mm, 90deg pivot="); out.print(TURN_90_TICKS); out.println(" encoder ticks. Key2 = emergency stop.");
 
-  // Generic DFS diagnostic uses its own coordinate workspace.
-  // A 16x16 array with the start at (8,8) only allowed 7 cells in the
-  // positive X/Y directions. Reaching that artificial edge made DFS think
-  // the next open cell was out-of-bounds and backtrack (often a 180 turn).
-  // 33x33 gives a symmetric +/-16-cell workspace around the launch point,
-  // enough to represent any 16x16 competition maze regardless of where this
-  // diagnostic is started.
-  constexpr int N = 33;
-  constexpr int START_X = 16;
-  constexpr int START_Y = 16;
-  // Full DFS of a 16x16 maze can require roughly 2*(256-1) moves.
-  constexpr uint16_t MAX_ACTIONS = 700;
+  // Use the same coordinates and bounds as stepPose() / MazeMap.
+  constexpr int N = 10;
+constexpr int START_X = 0;
+constexpr int START_Y = 0;
+constexpr uint16_t MAX_ACTIONS = 300;
 
   bool visited[N][N] = {};
   int8_t parentBack[N][N];
@@ -510,46 +478,11 @@ bool MazeNavigator::homeDfsTest(int pwm, Print &out) {
   const int navPwm = pwm;
   out.print("DFS drive PWM="); out.print(navPwm); out.println(" (same as cell)");
 
-  // IMPORTANT: homeDfsTest uses a 33x33 LOCAL diagnostic coordinate grid,
-  // while MazeMap::inBounds() is the real 16x16 competition map.  Do not call
-  // stepPose() here because stepPose() validates pose.x/pose.y against the
-  // 16x16 MazeMap and would reject the diagnostic start at (16,16) after the
-  // very first physical cell move.  This local step performs the exact same
-  // turn + one-cell drive, then updates only the diagnostic pose.
-  auto stepLocal = [&](Heading next, int movePwm) -> bool {
-    if (!_motion.turnToHeading(pose.heading, next)) return false;
-    _motion.invalidateMazeSegmentAnchor();
-    if (!_motion.driveCell(movePwm, true)) return false;
-    switch (next) {
-      case Heading::North: ++pose.y; break;
-      case Heading::East:  ++pose.x; break;
-      case Heading::South: --pose.y; break;
-      case Heading::West:  --pose.x; break;
-    }
-    pose.heading = next;
-    return inBoundsLocal(pose.x, pose.y);
-  };
-
   for (uint16_t action = 0; action < MAX_ACTIONS; ++action) {
-    auto stableWall = [&](uint8_t which) {
-      uint8_t noCloseStreak = 0;
-      for (uint8_t k = 0; k < SIDE_OPEN_CONFIRM_SAMPLES; ++k) {
-        bool closeNow = false;
-        if (which == 0) closeNow = _motion.wallLeft();
-        else if (which == 1) closeNow = _motion.wallFront();
-        else closeNow = _motion.wallRight();
-        if (closeNow) noCloseStreak = 0;
-        else ++noCloseStreak;
-        delay(SENSOR_PERIOD_MS + 2);
-      }
-      return noCloseStreak < SIDE_OPEN_CONFIRM_SAMPLES;
-    };
-
-    const MoveSideObservation &obs = _motion.lastMoveSideObservation();
-    const bool wallL = (obs.valid && obs.left == SideObservation::Open) ? false : stableWall(0);
-    const bool wallF = stableWall(1);
-    const bool wallR = (obs.valid && obs.right == SideObservation::Open) ? false : stableWall(2);
-    _motion.clearLastMoveSideObservation();
+    delay(35); // ToF task runs every 20 ms; one fresh sample is enough before the decision.
+    const bool wallL = _motion.wallLeft();
+    const bool wallF = _motion.wallFront();
+    const bool wallR = _motion.wallRight();
 
     out.print("cell("); out.print(pose.x - START_X); out.print(','); out.print(pose.y - START_Y);
     out.print(") heading=");
@@ -596,7 +529,7 @@ bool MazeNavigator::homeDfsTest(int pwm, Print &out) {
       int nx, ny;
       neighborLocal(pose.x, pose.y, chosen, nx, ny);
       out.print("EXPLORE -> "); out.println(hc[(uint8_t)chosen & 3]);
-      if (!stepLocal(chosen, navPwm)) {
+      if (!stepPose(pose, chosen, navPwm)) {
         out.println("DFS FAIL: movement/turn failed or Key2 killed the run.");
         return false;
       }
@@ -630,7 +563,7 @@ bool MazeNavigator::homeDfsTest(int pwm, Print &out) {
     delay(80);
     const int backPwm = navPwm;
     out.print("BACKTRACK DRIVE: same-as-cell + wall-centering PWM="); out.println(backPwm);
-    if (!stepLocal(back, backPwm)) {
+    if (!stepPose(pose, back, backPwm)) {
       out.println("DFS FAIL: BACKTRACK DRIVE/TURN failed or Key2 killed the run.");
       return false;
     }
@@ -643,12 +576,14 @@ bool MazeNavigator::homeDfsTest(int pwm, Print &out) {
 
 bool MazeNavigator::explorationRun(int pwm, Print &out) {
   _motion.invalidateMazeSegmentAnchor();
-  _motion.clearLastMoveSideObservation();
-
-  // v37: every `explore` command is a FRESH competition exploration.
-  // Never inherit stale walls/path from a previous physical maze.
-  _map.reset();
-  out.println("Exploration: NEW 16x16 map reset. START=(0,0), heading=N.");
+  StoredMaze prior;
+  if (_storage.load(prior, out)) {
+    out.println("Exploration: continuing with previously discovered map.");
+    _map.load(prior);
+  } else {
+    out.println("Exploration: starting a new map.");
+    _map.reset();
+  }
 
   Pose pose;
   pose.x = 0;
@@ -656,16 +591,9 @@ bool MazeNavigator::explorationRun(int pwm, Print &out) {
   pose.heading = Heading::North;
   bool returning = false;
 
-  const char hc[4] = {'N','E','S','W'};
   for (uint16_t step = 0; step < 700; ++step) {
     delay(35); // let ToF snapshot settle after a movement/turn
     _map.senseCurrentCell(pose, _motion);
-
-    out.print("EXPLORE step="); out.print(step);
-    out.print(" cell("); out.print(pose.x); out.print(','); out.print(pose.y);
-    out.print(") heading="); out.print(hc[(uint8_t)pose.heading & 3]);
-    out.print(returning ? " RETURN" : " OUT");
-    out.println();
 
     if (!returning && _map.isGoal(pose.x, pose.y)) {
       out.print("Goal reached at ("); out.print(pose.x); out.print(','); out.print(pose.y); out.println("). Returning while mapping.");
@@ -685,15 +613,12 @@ bool MazeNavigator::explorationRun(int pwm, Print &out) {
 
     Heading next;
     if (!_map.chooseNext(pose, returning, next)) {
-      out.print("Exploration failed: no reachable next cell at (");
-      out.print(pose.x); out.print(','); out.print(pose.y); out.println(").");
+      out.println("Exploration failed: no reachable next cell.");
       return false;
     }
-    out.print("CHOOSE -> "); out.println(hc[(uint8_t)next & 3]);
     _map.setWall(pose.x, pose.y, next, false);
     if (!stepPose(pose, next, pwm)) {
-      out.print("Exploration motion failed at ("); out.print(pose.x); out.print(',');
-      out.print(pose.y); out.print(") heading="); out.println(hc[(uint8_t)pose.heading & 3]);
+      out.println("Exploration motion failed or was killed.");
       return false;
     }
   }

@@ -100,8 +100,7 @@ void TestSuite::testToF(Print &out, uint16_t seconds) {
   out.print("VL53L0X present mask = 0x"); out.println(_tofArray.presentMask(), HEX);
   out.println("Confirmed mapping: 0=FRONT_LEFT, 1=LEFT, 2=RIGHT, 3=FRONT_RIGHT.");
   out.println("Move a hand/wall in front of ONE sensor at a time and confirm the matching index changes.");
-  out.println("v38 uses the SAME Adafruit rangingTest() single-shot method as the proven standalone S1-S4 sketch.");
-  out.println("ERR means that scan did not produce a usable range; present mask 0xF means all 4 devices initialized.");
+  out.println("This test is non-blocking. ERR can simply mean no usable target; present mask 0xF means all 4 devices initialized.");
   out.println("To verify one sensor, place a flat white card 50-100 mm directly in front of that sensor.");
 
   uint32_t until = millis() + seconds * 1000UL;
@@ -427,56 +426,87 @@ bool TestSuite::calibrateRollDistance(float mm, Print &out) {
 }
 
 bool TestSuite::calibrateWalls(Print &out) {
-  out.println("VL53L0X CLOSE-ONLY WALL CALIBRATION");
-  out.println("For each sensor, place a real maze wall at its normal PRESENT/CLOSE distance.");
-  out.print("OPEN distance is not calibrated. Wall threshold = CLOSE + ");
-  out.print(WALL_CLOSE_MARGIN_PCT);
-  out.println("% margin.");
+  out.println("VL53L0X WALL CALIBRATION");
+  out.println("For each sensor, use a real white maze wall/panel. 'Present' means the normal distance seen while the robot is centered in a cell. 'Open' means no wall in that direction for at least one cell.");
 
   for (uint8_t i = 0; i < 4; ++i) {
-    out.print("Sensor index "); out.print(i);
-    out.println(": place wall at normal PRESENT/CLOSE distance, then press ENTER.");
+    out.print("Sensor index "); out.print(i); out.println(": place wall at normal PRESENT distance, then press ENTER.");
     if (readLine() == "__KILL__") return false;
-
     uint16_t present = sampleSensor(i, 35);
-    out.print("close average = "); out.println(present);
+    out.print("present average = "); out.println(present);
 
-    if (present >= 4000 || present < 20) {
-      out.println("Sensor calibration FAIL: CLOSE wall did not produce a valid range.");
+    out.println("Now remove/move that wall to OPEN condition, then press ENTER.");
+    if (readLine() == "__KILL__") return false;
+    uint16_t open = sampleSensor(i, 35);
+    out.print("open average = "); out.println(open);
+
+    if (present >= 4000) {
+      out.println("Sensor calibration FAIL: PRESENT wall did not produce a valid close reading.");
       return false;
     }
 
-    uint32_t t = (uint32_t)present * (100u + WALL_CLOSE_MARGIN_PCT) / 100u;
-    if (t > 500u) t = 500u;
-    _cal.wallThresholdMm[i] = (uint16_t)t;
+    // A VL53L0X may legitimately report no valid range (8190/8191) when the
+    // immediate wall is removed. That is a valid OPEN condition, not a failure.
+    // One MicroMaze lattice pitch is 192 mm, so when OPEN is out-of-range we
+    // place the threshold approximately halfway to the next-cell wall: +96 mm.
+    if (open >= 8000) {
+      uint16_t t = (uint16_t)(present + 96u);
+      if (t < present + 30u) t = present + 30u;
+      if (t > 500u) t = 500u;
+      _cal.wallThresholdMm[i] = t;
+      out.println("OPEN returned no valid range; accepting this as OPEN.");
+    } else {
+      if (open <= present + 10) {
+        out.println("Sensor calibration FAIL: expected OPEN distance to be clearly larger than PRESENT.");
+        return false;
+      }
+      _cal.wallThresholdMm[i] = (uint16_t)((present + open) / 2u);
+    }
+    out.print("threshold["); out.print(i); out.print("] = "); out.println(_cal.wallThresholdMm[i]);
 
-    out.print("threshold["); out.print(i); out.print("] = ");
-    out.print(_cal.wallThresholdMm[i]);
-    out.println(" mm (close + percentage margin)");
-
-    // The side CLOSE value measured while physically centered is also the
-    // centering reference for the wall-follow controller.
     if (i == SensorMap::LEFT) _cal.sideTargetLeftMm = present;
     if (i == SensorMap::RIGHT) _cal.sideTargetRightMm = present;
   }
-
-  out.println("Close-only wall calibration complete. Run 'savecal' to persist.");
   return true;
 }
 
 void TestSuite::tunePidCommand(const String &line, Print &out) {
-  float a = _cal.straightKp, b = _cal.wallKp, c = _cal.gyroTurnKp;
+  // SAME terminal command as v32. The three values now directly mean Kp/Ki/Kd.
+  float a = _cal.pidKp, b = _cal.pidKi, c = _cal.pidKd;
   int n = sscanf(line.c_str(), "pid %f %f %f", &a, &b, &c);
   if (n < 2) {
-    out.println("Usage: pid <straightKp> <wallKp> [gyroTurnKp]");
+    out.println("Usage: pid <Kp> <Ki> [Kd]");
     return;
   }
-  _cal.straightKp = a;
-  _cal.wallKp = b;
-  if (n >= 3) _cal.gyroTurnKp = c;
-  out.print("PID updated: straight="); out.print(_cal.straightKp, 3);
-  out.print(" wall="); out.print(_cal.wallKp, 3);
-  out.print(" gyroTurn="); out.println(_cal.gyroTurnKp, 3);
+  _cal.pidKp = a;
+  _cal.pidKi = b;
+  if (n >= 3) _cal.pidKd = c;
+  out.print("PID updated: Kp="); out.print(_cal.pidKp, 3);
+  out.print(" Ki="); out.print(_cal.pidKi, 3);
+  out.print(" Kd="); out.println(_cal.pidKd, 3);
+}
+
+void TestSuite::tuneFrontPidCommand(const String &line, bool square, Print &out) {
+  const char *command = square ? "front_square_pid" : "front_pid";
+  float &kp = square ? _cal.squareKp : _cal.frontKp;
+  float &ki = square ? _cal.squareKi : _cal.frontKi;
+  float &kd = square ? _cal.squareKd : _cal.frontKd;
+  if (line != command) {
+    float p, i, d;
+    char extra;
+    int count = sscanf(line.c_str(), "%*s %f %f %f %c", &p, &i, &d, &extra);
+    if (count != 3 || !isfinite(p) || !isfinite(i) || !isfinite(d) ||
+        p < 0.0f || i < 0.0f || d < 0.0f || p > 100.0f || i > 100.0f || d > 100.0f) {
+      out.print("Usage: "); out.print(command);
+      out.println(" <Kp> <Ki> <Kd> (each finite, 0..100); omit values to view.");
+      return;
+    }
+    kp = p; ki = i; kd = d;
+    out.println("Applied. Run savecal to persist after reboot.");
+  }
+  out.print(command); out.print(" Kp="); out.print(kp, 3);
+  out.print(" Ki="); out.print(ki, 3);
+  out.print(" Kd="); out.println(kd, 3);
 }
 
 bool TestSuite::guidedCalibration() {
@@ -520,7 +550,7 @@ void TestSuite::printStatus(Print &out) {
   out.print("wall thresholds: ");
   for (uint8_t i = 0; i < 4; ++i) { out.print(_cal.wallThresholdMm[i]); out.print(i == 3 ? '\n' : ' '); }
   out.print("side targets L/R: "); out.print(_cal.sideTargetLeftMm); out.print(" / "); out.println(_cal.sideTargetRightMm);
-  out.print("PID straight/wall/turn: "); out.print(_cal.straightKp, 3); out.print(" / "); out.print(_cal.wallKp, 3); out.print(" / "); out.println(_cal.gyroTurnKp, 3);
+  out.print("PID Kp/Ki/Kd: "); out.print(_cal.pidKp, 3); out.print(" / "); out.print(_cal.pidKi, 3); out.print(" / "); out.println(_cal.pidKd, 3);
 }
 
 void TestSuite::printHelp(Print &out) {
@@ -546,17 +576,16 @@ void TestSuite::printHelp(Print &out) {
   out.println("set_ticks <L> <R>    - directly set encoder ticks/mm calibration");
   out.println("walls                - print current L/F/R distance + wall decision for 5 s");
   out.println("cal_roll <mm>        - hand-roll encoder distance calibration (192 mm is one cell pitch)");
-  out.println("cal_wall             - CLOSE-only wall calibration + percentage margin");
+  out.println("cal_wall             - interactive wall/no-wall threshold calibration");
   out.println("cal_imu              - robust stationary physical-yaw (MPU Z) bias calibration");
-  out.println("pid <s> <w> [g]      - set straight/wall/gyro-turn gains");
+  out.println("pid <Kp> <Ki> [Kd]   - set drive steering PID gains");
+  out.println("front_pid [Kp Ki Kd] - view/set front distance PID; savecal to persist");
+  out.println("front_square_pid [Kp Ki Kd] - view/set front squaring PID");
   out.println("savecal              - save calibration to ESP32 NVS");
   out.println("clearcal             - erase calibration NVS");
   out.println("deadend_test         - simple home route: first dead end then retrace to start");
   out.println("dfs_test             - conservative generic DFS test");
-  out.println("dfs_fast             - adaptive FAST DFS diagnostic");
-  out.println("explore              - competition exploration: start -> centre goal -> return -> save shortest path");
-  out.println("fast_run             - run saved shortest path from START to centre at FAST_PWM");
-  out.println("fast_return          - run saved shortest path to centre and autonomously return to START");
+  out.println("dfs_fast             - adaptive FAST DFS: fast open cells, slows on front wall/turn");
   out.println("maze                 - dump stored maze + optimal path");
   out.println("clearmaze            - clear external EEPROM maze/path header");
   out.println("all_safe             - I2C + IO + ToF + IMU + EEPROM tests (no wheel drive)");
@@ -648,18 +677,13 @@ void TestSuite::debugLoop(Stream &console) {
     else if (line == "cal_wall") calibrateWalls(console);
     else if (line == "cal_imu") _cal.gyroBiasZDps = _imu.calibrateGyroYaw(console);
     else if (line.startsWith("pid ")) tunePidCommand(line, console);
+    else if (line == "front_pid" || line.startsWith("front_pid ")) tuneFrontPidCommand(line, false, console);
+    else if (line == "front_square_pid" || line.startsWith("front_square_pid ")) tuneFrontPidCommand(line, true, console);
     else if (line == "savecal") console.println(_calStore.save(_cal) ? "Calibration saved." : "Calibration save FAILED.");
     else if (line == "clearcal") { _calStore.clear(); console.println("Calibration NVS cleared; reboot or recalibrate."); }
     else if (line == "deadend_test") _maze.deadEndReturnTest(SLOW_PWM, console);
     else if (line == "dfs_test") _maze.homeDfsTest(SLOW_PWM, console);
     else if (line == "dfs_fast") _maze.homeDfsTest(FAST_PWM, console);
-    else if (line == "explore") {
-      console.println("COMPETITION GOAL: any centre cell (7,7), (7,8), (8,7), or (8,8). No endpoint entry is required.");
-      console.println("Place robot in START cell (0,0), facing the only maze exit, then run.");
-      _maze.explorationRun(SLOW_PWM, console);
-    }
-    else if (line == "fast_run") _maze.storedRun(FAST_PWM, false, FAST_PWM, console);
-    else if (line == "fast_return") _maze.storedRun(FAST_PWM, true, FAST_PWM, console);
     else if (line == "maze") _maze.dumpStored(console);
     else if (line == "clearmaze") _maze.clearStored(console);
     else if (line == "all_safe") {

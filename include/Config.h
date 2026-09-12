@@ -73,7 +73,7 @@ constexpr uint8_t PWM_BITS = 8;
 constexpr int PWM_MAX = 255;
 
 constexpr float CELL_MM = 192.0f; // lattice-point / cell-center pitch; clear corridor width is 180 mm
-constexpr uint8_t MAZE_N = 16;
+constexpr uint8_t MAZE_N = 10;
 constexpr uint16_t MAX_PATH = 512;
 
 // Starting engineering values. These are NOT competition booklet limits.
@@ -101,7 +101,7 @@ constexpr uint16_t FRONT_DOCK_TRIGGER_MM = 170;
 // from physically contacting the wall before the motors can stop.
 constexpr uint16_t FRONT_PREALIGN_MM = 105;
 constexpr uint16_t FRONT_PREALIGN_MIN_PROGRESS_MM = 45;
-constexpr uint16_t FRONT_REFERENCE_CONFIRM_SAMPLES = 3;
+constexpr uint16_t FRONT_REFERENCE_CONFIRM_SAMPLES = 2;
 constexpr uint16_t FRONT_MAX_EXTRA_TRAVEL_MM = 90;
 constexpr uint16_t FRONT_ALIGN_TOL_MM = 3;
 constexpr uint16_t FRONT_SQUARE_TOL_MM = 6;
@@ -116,7 +116,16 @@ constexpr uint16_t FRONT_LOCALIZE_MAX_EXTRA_MM = 110;
 constexpr uint16_t FRONT_LOCALIZE_BRAKE_MM = 90;
 constexpr int FRONT_ALIGN_MAX_PWM = 72;
 constexpr float FRONT_ALIGN_KP = 1.25f;
+constexpr float FRONT_ALIGN_KI = 0.20f;
+constexpr float FRONT_ALIGN_KD = 0.08f;
 constexpr float FRONT_SQUARE_KP = 0.90f;
+constexpr float FRONT_SQUARE_KI = 0.15f;
+constexpr float FRONT_SQUARE_KD = 0.05f;
+constexpr float FRONT_ALIGN_I_LIMIT_PWM = 12.0f;
+constexpr float FRONT_ALIGN_D_FILTER_S = 0.08f;
+constexpr uint32_t FRONT_ALIGN_TIMEOUT_MS = 5000;
+constexpr uint32_t FRONT_ALIGN_CONTROL_MS = 20;
+constexpr uint32_t FRONT_ALIGN_STALE_MS = 200;
 
 // Corridor anti-contact / stall recovery. These values are deliberately
 // conservative for the competition-deadline build.
@@ -126,17 +135,6 @@ constexpr uint32_t DRIVE_STALL_MS = 550;
 constexpr uint8_t DRIVE_MAX_RECOVERIES = 2;
 constexpr int DRIVE_RECOVERY_PWM = 78;
 constexpr uint32_t DRIVE_RECOVERY_REVERSE_MS = 120;
-
-// v36 close-only wall calibration:
-// threshold = calibrated PRESENT/CLOSE distance + this percentage margin.
-// OPEN distance is NOT used to calculate the threshold.
-constexpr uint8_t WALL_CLOSE_MARGIN_PCT = 50;
-
-// A side opening is accepted only after this many consecutive fresh samples
-// fail the CLOSE test while entering the destination cell.
-constexpr uint8_t SIDE_OPEN_CONFIRM_SAMPLES = 3;
-constexpr float SIDE_OBS_WINDOW_START_FRAC = 0.50f;
-constexpr float SIDE_OBS_WINDOW_END_FRAC = 0.98f;
 constexpr uint32_t SENSOR_PERIOD_MS = 20;
 
 constexpr uint32_t COUNTDOWN_MS = 5000;

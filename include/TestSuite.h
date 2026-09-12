@@ -66,6 +66,7 @@ private:
   bool calibrateRollDistance(float mm, Print &out);
   bool calibrateWalls(Print &out);
   void tunePidCommand(const String &line, Print &out);
+  void tuneFrontPidCommand(const String &line, bool square, Print &out);
 };
 
 } // namespace MM3

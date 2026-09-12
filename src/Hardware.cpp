@@ -216,27 +216,27 @@ bool DistanceArray::begin(TwoWire &bus) {
     }
   }
 
-  // IMPORTANT (v38): do NOT start continuous ranging here.
-  // The standalone sketch that proved S1..S4 all work uses Adafruit's
-  // rangingTest() single-shot path.  v38 intentionally uses that exact
-  // measurement method for the navigation sensor service too, because the
-  // previous continuous isRangeComplete()/readRangeResult() path repeatedly
-  // produced FRONT_RIGHT (S4/index 3) ERR on the real robot.
+  // Use Adafruit's supported continuous-ranging API rather than manually
+  // reading ST result registers.  Start each sensor a few milliseconds apart so
+  // their measurements are phase-staggered on the shared bus.
+  for (uint8_t i = 0; i < 4; ++i) {
+    if (_ok[i]) {
+      _sensor[i].startRangeContinuous(50);
+      delay(8);
+    }
+  }
 
   _allPresent = (_presentMask == 0x0F);
   return _allPresent;
 }
 
 void DistanceArray::readAll(SensorSnapshot &out) {
-  // v38 RELIABLE ToF PATH:
-  // Match the user's known-good standalone test as closely as possible:
-  //   sensor1.rangingTest(&m1, false);
-  //   sensor2.rangingTest(&m2, false);
-  //   sensor3.rangingTest(&m3, false);
-  //   sensor4.rangingTest(&m4, false);
-  // One complete S1->S4 scan is published as one coherent snapshot.
-  bool anyPresent = false;
+  bool anyFresh = false;
 
+  // This is non-blocking: isRangeComplete() only checks readiness, and
+  // readRangeResult() is called only after the sensor reports a completed
+  // measurement.  This keeps the Wi-Fi/debug terminal responsive while using
+  // the same Adafruit driver that produced valid S1..S4 readings on the robot.
   for (uint8_t i = 0; i < 4; ++i) {
     if (!_ok[i]) {
       out.mm[i] = 8190;
@@ -244,22 +244,20 @@ void DistanceArray::readAll(SensorSnapshot &out) {
       continue;
     }
 
-    VL53L0X_RangingMeasurementData_t m{};
-    _sensor[i].rangingTest(&m, false);
+    if (!_sensor[i].isRangeComplete()) continue;
 
-    // This is the same primary validity decision used by the proven sketch:
-    // RangeStatus == 4 means out/no usable target.  Keep a few impossible
-    // sentinel/zero checks so navigation can never mistake corrupt data for a
-    // very close wall.
-    const uint16_t mm = m.RangeMilliMeter;
-    const bool good = (m.RangeStatus != 4) && (mm > 0) && (mm != 0xFFFFu) && (mm < 8190u);
+    const uint16_t mm = _sensor[i].readRangeResult();
+    const uint8_t rangeStatus = _sensor[i].readRangeStatus();
 
+    // Adafruit/ST can return sentinel values such as 8191/65535 for bad or
+    // out-of-range measurements.  Treat those as invalid rather than as walls.
+    const bool good = (rangeStatus != 4) && (mm > 0) && (mm < 4000) && (mm != 0xFFFFu);
     out.mm[i] = good ? mm : 8190;
     out.valid[i] = good;
-    anyPresent = true;
+    anyFresh = true;
   }
 
-  if (anyPresent) out.stampMs = millis();
+  if (anyFresh) out.stampMs = millis();
 }
 
 // ---------------- Core-0 distance sensor task ----------------
