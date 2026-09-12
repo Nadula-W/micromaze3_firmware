@@ -102,6 +102,8 @@ void TestSuite::testToF(Print &out, uint16_t seconds) {
   out.println("Move a hand/wall in front of ONE sensor at a time and confirm the matching index changes.");
   out.println("This test is non-blocking. ERR can simply mean no usable target; present mask 0xF means all 4 devices initialized.");
   out.println("To verify one sensor, place a flat white card 50-100 mm directly in front of that sensor.");
+  out.println("S4/FR diagnostics: readyAPI=latest poll, readAPI=last result API (0=success).");
+  out.println("range=0 valid, 255 unavailable; raw=library result (65535=error sentinel). readAge is time since last read attempt.");
 
   uint32_t until = millis() + seconds * 1000UL;
   while ((int32_t)(until - millis()) > 0) {
@@ -115,6 +117,14 @@ void TestSuite::testToF(Print &out, uint16_t seconds) {
     out.print(" age=");
     if (s.stampMs == 0) out.println("NO-DATA");
     else { out.print(millis() - s.stampMs); out.println("ms"); }
+    const uint8_t fr = SensorMap::FRONT_RIGHT;
+    out.print("  S4/FR readyAPI="); out.print((int)s.readyApi[fr]);
+    out.print(" readAPI="); out.print((int)s.readApi[fr]);
+    out.print(" range="); out.print(s.rangeStatus[fr]);
+    out.print(" raw="); out.print(s.rawMm[fr]);
+    out.print(" readAge=");
+    if (s.readStampMs[fr] == 0) out.println("NO-DATA");
+    else { out.print(millis() - s.readStampMs[fr]); out.println("ms"); }
     delay(200);
   }
   out.println("ToF live test complete.");
@@ -585,6 +595,7 @@ void TestSuite::printHelp(Print &out) {
   out.println("clearcal             - erase calibration NVS");
   out.println("deadend_test         - simple home route: first dead end then retrace to start");
   out.println("dfs_test             - conservative generic DFS test");
+  out.println("explore              - start (0,0) North, reach configured goal, return and save");
   out.println("dfs_fast             - adaptive FAST DFS: fast open cells, slows on front wall/turn");
   out.println("maze                 - dump stored maze + optimal path");
   out.println("clearmaze            - clear external EEPROM maze/path header");
@@ -683,6 +694,7 @@ void TestSuite::debugLoop(Stream &console) {
     else if (line == "clearcal") { _calStore.clear(); console.println("Calibration NVS cleared; reboot or recalibrate."); }
     else if (line == "deadend_test") _maze.deadEndReturnTest(SLOW_PWM, console);
     else if (line == "dfs_test") _maze.homeDfsTest(SLOW_PWM, console);
+    else if (line == "explore") _maze.explorationRun(SLOW_PWM, console);
     else if (line == "dfs_fast") _maze.homeDfsTest(FAST_PWM, console);
     else if (line == "maze") _maze.dumpStored(console);
     else if (line == "clearmaze") _maze.clearStored(console);

@@ -18,7 +18,8 @@ It does not stop at the goal (6,6).
 
 Front alignment now uses separate distance and squaring PID controllers, with
 filtered derivatives, bounded integrals, and short PWM pulses for small errors.
-The target remains 80 mm; alignment must settle within 3 mm distance and 6 mm
+The target remains 80 mm; alignment must settle within 15 mm distance (65-95 mm)
+and 6 mm
 front-sensor difference for 120 ms. The timeout is 5 seconds.
 After uploading, test `front_align 80` facing a nearby flat wall before `dfs_test`.
 The initial gains need verification on the robot. In the terminal:
@@ -45,6 +46,11 @@ Before a fresh home exploration:
 4. `clearmaze`
 5. `explore`
 6. `maze`
-7. reposition at START facing North, then `fast_run`
+7. reposition at START facing North, then select Fast mode and press Key1.
+
+`explore` (or Exploration DIP mode `111`) starts at (0,0), facing North,
+targets only (6,6), returns to (0,0), and saves the confirmed shortest route.
+Goal coordinates are `MAZE_GOAL_X/Y` in `include/Config.h`. Storage version 3
+rejects maps/routes saved for the previous goal; run exploration before Fast mode.
 
 For the competition, restore `MAZE_N = 16` and the normal four center goal cells.

@@ -28,6 +28,12 @@ struct SensorSnapshot {
   uint16_t mm[4] = {8190, 8190, 8190, 8190};
   bool valid[4] = {false, false, false, false};
   uint32_t stampMs = 0;
+  // Diagnostic metadata only; navigation continues to use mm/valid above.
+  int8_t readyApi[4] = {0, 0, 0, 0};
+  int8_t readApi[4] = {0, 0, 0, 0};
+  uint8_t rangeStatus[4] = {255, 255, 255, 255};
+  uint16_t rawMm[4] = {65535, 65535, 65535, 65535};
+  uint32_t readStampMs[4] = {0, 0, 0, 0};
 };
 
 struct Pose {

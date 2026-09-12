@@ -45,7 +45,7 @@ constexpr uint8_t MPU6050 = 0x68;
 constexpr uint8_t EEPROM_BLOCK0 = 0x50;
 constexpr uint8_t EEPROM_BLOCK1 = 0x51;
 constexpr uint8_t VL53_DEFAULT = 0x29;
-constexpr uint8_t VL53[4] = {0x30, 0x31, 0x32, 0x33};
+constexpr uint8_t VL53[4] = {0x30, 0x31, 0x32, 0x35};
 }
 
 // IMPORTANT: The uploaded hardware document gives four XSHUT pins but does not
@@ -74,6 +74,9 @@ constexpr int PWM_MAX = 255;
 
 constexpr float CELL_MM = 192.0f; // lattice-point / cell-center pitch; clear corridor width is 180 mm
 constexpr uint8_t MAZE_N = 10;
+constexpr uint8_t MAZE_GOAL_X = 6;
+constexpr uint8_t MAZE_GOAL_Y = 6;
+static_assert(MAZE_GOAL_X < MAZE_N && MAZE_GOAL_Y < MAZE_N, "Goal must be inside the maze");
 constexpr uint16_t MAX_PATH = 512;
 
 // Starting engineering values. These are NOT competition booklet limits.
@@ -103,7 +106,8 @@ constexpr uint16_t FRONT_PREALIGN_MM = 105;
 constexpr uint16_t FRONT_PREALIGN_MIN_PROGRESS_MM = 45;
 constexpr uint16_t FRONT_REFERENCE_CONFIRM_SAMPLES = 2;
 constexpr uint16_t FRONT_MAX_EXTRA_TRAVEL_MM = 90;
-constexpr uint16_t FRONT_ALIGN_TOL_MM = 3;
+constexpr uint16_t FRONT_REFERENCE_TOL_MM = 3; // front reference while driving
+constexpr uint16_t FRONT_ALIGN_TOL_MM = 15; // stopped alignment: 65-95 mm at 80 mm target
 constexpr uint16_t FRONT_SQUARE_TOL_MM = 6;
 // Grid-phase localization from a visible wall.  At a true cell centre the front
 // sensor should read FRONT_TURN_TARGET_MM + N*CELL_MM.  While a cell move is in
@@ -143,6 +147,6 @@ constexpr uint32_t BUTTON_DEBOUNCE_MS = 35;
 constexpr uint32_t CAL_MAGIC = 0x4D4D3343;   // "MM3C"
 constexpr uint16_t CAL_VERSION = 3;
 constexpr uint32_t MAZE_MAGIC = 0x4D4D334D;  // "MM3M"
-constexpr uint16_t MAZE_VERSION = 2;
+constexpr uint16_t MAZE_VERSION = 3; // invalidate saved paths to the previous goal
 
 } // namespace MM3

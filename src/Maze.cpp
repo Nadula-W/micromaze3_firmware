@@ -46,7 +46,7 @@ bool MazeMap::inBounds(int x, int y) const {
 }
 
 bool MazeMap::isGoal(int x, int y) const {
-  return (x == 7 || x == 8) && (y == 7 || y == 8);
+  return x == MAZE_GOAL_X && y == MAZE_GOAL_Y;
 }
 
 bool MazeMap::isVisited(int x, int y) const {
@@ -132,12 +132,8 @@ void MazeMap::computeDistances(bool targetStart, bool unknownAsWall,
     dist[idx(0, 0)] = 0;
     q[tail++] = idx(0, 0);
   } else {
-    for (uint8_t y = 7; y <= 8; ++y) {
-      for (uint8_t x = 7; x <= 8; ++x) {
-        dist[idx(x, y)] = 0;
-        q[tail++] = idx(x, y);
-      }
-    }
+    dist[idx(MAZE_GOAL_X, MAZE_GOAL_Y)] = 0;
+    q[tail++] = idx(MAZE_GOAL_X, MAZE_GOAL_Y);
   }
 
   while (head < tail) {
@@ -576,6 +572,9 @@ constexpr uint16_t MAX_ACTIONS = 300;
 
 bool MazeNavigator::explorationRun(int pwm, Print &out) {
   _motion.invalidateMazeSegmentAnchor();
+  out.print("Exploration: START=(0,0), heading=N, GOAL=(");
+  out.print(MAZE_GOAL_X); out.print(','); out.print(MAZE_GOAL_Y);
+  out.println("). Reach goal, return to START, then save route.");
   StoredMaze prior;
   if (_storage.load(prior, out)) {
     out.println("Exploration: continuing with previously discovered map.");

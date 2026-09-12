@@ -221,7 +221,7 @@ bool MotionController::driveDistanceMm(float distanceMm, int basePwm, bool useWa
 
         if (latticeLocked) {
           float physicalRemaining = (float)frontAvg - latticeTargetFrontMm;
-          if (physicalRemaining <= FRONT_ALIGN_TOL_MM) {
+          if (physicalRemaining <= FRONT_REFERENCE_TOL_MM) {
             if (s.stampMs != lastFrontStamp) {
               if (latticeStopSamples < 10) ++latticeStopSamples;
             }
@@ -262,7 +262,7 @@ bool MotionController::driveDistanceMm(float distanceMm, int basePwm, bool useWa
       // before OR after the nominal 192 mm encoder point, which removes accumulated
       // longitudinal error whenever a front wall is available.
       if (frontReferenceActive &&
-          frontAvg <= FRONT_TURN_TARGET_MM + FRONT_ALIGN_TOL_MM) {
+          frontAvg <= FRONT_TURN_TARGET_MM + FRONT_REFERENCE_TOL_MM) {
         Serial.print("FRONT REFERENCE STOP: F=");
         Serial.print(frontAvg);
         Serial.print(" mm, encoder=");
@@ -707,9 +707,37 @@ bool MotionController::alignFrontToWall(uint16_t targetMm, int maxPwm) {
   int rightSign = 0;
   uint8_t previousFrontMask = 0;
 
+  // Buffer diagnostics during control; print only after stopping the motors.
+  // This keeps serial output from stretching the small correction pulses.
+  struct AlignSample {
+    uint32_t elapsed;
+    int left, right;
+    float distanceError, squareError;
+    int leftPwm, rightPwm;
+    int32_t leftTicks, rightTicks;
+  };
+  constexpr uint32_t TRACE_PERIOD_MS = 250;
+  AlignSample trace[FRONT_ALIGN_TIMEOUT_MS / TRACE_PERIOD_MS + 1];
+  size_t traceCount = 0;
+  uint32_t lastTraceMs = startMs;
+  const int32_t startLeftTicks = _motors.leftTicks();
+  const int32_t startRightTicks = _motors.rightTicks();
+  auto recordSample = [&](uint32_t now, int left, int right, float distErr,
+                          float squareErr, int lp, int rp) {
+    if (traceCount && now - lastTraceMs < TRACE_PERIOD_MS) return;
+    if (traceCount >= sizeof(trace) / sizeof(trace[0])) return;
+    lastTraceMs = now;
+    trace[traceCount++] = {now - startMs, left, right, distErr, squareErr,
+                           lp, rp, _motors.leftTicks() - startLeftTicks,
+                           _motors.rightTicks() - startRightTicks};
+  };
+
   Serial.print("FRONT ALIGN target=");
   Serial.print(targetMm);
   Serial.println(" mm");
+  Serial.printf("Front PID=%.3f/%.3f/%.3f square PID=%.3f/%.3f/%.3f\n",
+                _cal.frontKp, _cal.frontKi, _cal.frontKd,
+                _cal.squareKp, _cal.squareKi, _cal.squareKd);
 
   while (!killed() && millis() - startMs < FRONT_ALIGN_TIMEOUT_MS) {
     uint32_t now = millis();
@@ -750,6 +778,8 @@ bool MotionController::alignFrontToWall(uint16_t targetMm, int maxPwm) {
 
     if (distOk && squareOk) {
       _motors.stop(true);
+      recordSample(now, lv ? (int)left : -1, rv ? (int)right : -1,
+                   distErr, squareErr, 0, 0);
       distancePid = AlignPid{};
       squarePid = AlignPid{};
       leftPulse = rightPulse = 0.0f;
@@ -813,10 +843,22 @@ bool MotionController::alignFrontToWall(uint16_t targetMm, int maxPwm) {
     int rightCmd = pulseCommand(rightDemand, rightPulse, rightSign);
 
     _motors.setWheels(leftCmd, rightCmd);
+    recordSample(now, lv ? (int)left : -1, rv ? (int)right : -1,
+                 distErr, squareErr, leftCmd, rightCmd);
   }
 
   _motors.stop(true);
   Serial.println(killed() ? "FRONT ALIGN stopped: Key2." : "FRONT ALIGN timeout: distance/squaring did not settle.");
+  Serial.println("ALIGN TRACE: ms FL FR distErr squareErr pwmL pwmR ticksL ticksR");
+  for (size_t i = 0; i < traceCount; ++i) {
+    const AlignSample &s = trace[i];
+    Serial.printf("%lu %d %d %.1f %.1f %d %d %ld %ld\n",
+                  (unsigned long)s.elapsed, s.left, s.right,
+                  s.distanceError, s.squareError, s.leftPwm, s.rightPwm,
+                  (long)s.leftTicks, (long)s.rightTicks);
+  }
+  Serial.printf("Required: |distErr| <= %u mm and |squareErr| <= %u mm for 120 ms.\n",
+                (unsigned)FRONT_ALIGN_TOL_MM, (unsigned)FRONT_SQUARE_TOL_MM);
   return false;
 }
 

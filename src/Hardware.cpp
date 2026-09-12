@@ -244,10 +244,17 @@ void DistanceArray::readAll(SensorSnapshot &out) {
       continue;
     }
 
-    if (!_sensor[i].isRangeComplete()) continue;
+    const bool ready = _sensor[i].isRangeComplete();
+    out.readyApi[i] = (int8_t)_sensor[i].Status;
+    if (!ready) continue;
 
     const uint16_t mm = _sensor[i].readRangeResult();
+    out.readApi[i] = (int8_t)_sensor[i].Status;
     const uint8_t rangeStatus = _sensor[i].readRangeStatus();
+    out.rawMm[i] = mm;
+    // The library's range status is not reliable when the read API fails.
+    out.rangeStatus[i] = out.readApi[i] == 0 ? rangeStatus : 255;
+    out.readStampMs[i] = millis();
 
     // Adafruit/ST can return sentinel values such as 8191/65535 for bad or
     // out-of-range measurements.  Treat those as invalid rather than as walls.
