@@ -63,7 +63,7 @@ public:
   // dead ends/junctions, and finishes back at the exact starting cell.
   bool homeDfsTest(int pwm, Print &out);
 
-  // Search run: map while going start -> goal -> start, then save map + shortest path.
+  // Search to goal, retrace every outbound move to start, save map + shortest path.
   bool explorationRun(int pwm, Print &out);
 
   // Execute the stored optimal path. Optional autonomous return avoids the reset penalty.

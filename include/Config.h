@@ -45,7 +45,7 @@ constexpr uint8_t MPU6050 = 0x68;
 constexpr uint8_t EEPROM_BLOCK0 = 0x50;
 constexpr uint8_t EEPROM_BLOCK1 = 0x51;
 constexpr uint8_t VL53_DEFAULT = 0x29;
-constexpr uint8_t VL53[4] = {0x30, 0x31, 0x32, 0x35};
+constexpr uint8_t VL53[4] = {0x30, 0x31, 0x32, 0x33};
 }
 
 // IMPORTANT: The uploaded hardware document gives four XSHUT pins but does not

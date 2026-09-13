@@ -574,7 +574,7 @@ bool MazeNavigator::explorationRun(int pwm, Print &out) {
   _motion.invalidateMazeSegmentAnchor();
   out.print("Exploration: START=(0,0), heading=N, GOAL=(");
   out.print(MAZE_GOAL_X); out.print(','); out.print(MAZE_GOAL_Y);
-  out.println("). Reach goal, return to START, then save route.");
+  out.println("). Reach goal, retrace outbound moves to START, then save route.");
   StoredMaze prior;
   if (_storage.load(prior, out)) {
     out.println("Exploration: continuing with previously discovered map.");
@@ -589,40 +589,95 @@ bool MazeNavigator::explorationRun(int pwm, Print &out) {
   pose.y = 0;
   pose.heading = Heading::North;
   bool returning = false;
+  constexpr uint16_t MAX_EXPLORE_MOVES = 700;
+  uint8_t outboundMoves[MAX_EXPLORE_MOVES];
+  uint16_t remainingMoves = 0;
 
-  for (uint16_t step = 0; step < 700; ++step) {
+  const char headingNames[4] = {'N', 'E', 'S', 'W'};
+  auto printPose = [&]() {
+    out.print("cell("); out.print(pose.x); out.print(','); out.print(pose.y);
+    out.print(") heading="); out.print(headingNames[(uint8_t)pose.heading & 3]);
+    out.print(" target=("); out.print(returning ? 0 : MAZE_GOAL_X);
+    out.print(','); out.print(returning ? 0 : MAZE_GOAL_Y); out.print(')');
+  };
+  auto dumpStopMap = [&]() {
+    out.print("EXPLORATION STOP: "); printPose(); out.println();
+    out.println("Map uses recorded coordinates; compare these with the physical maze.");
+    _map.print(out);
+  };
+
+  // Allow the full outbound budget, every reverse move, and the final check.
+  for (uint16_t step = 0; step <= 2 * MAX_EXPLORE_MOVES; ++step) {
     delay(35); // let ToF snapshot settle after a movement/turn
     _map.senseCurrentCell(pose, _motion);
 
     if (!returning && _map.isGoal(pose.x, pose.y)) {
-      out.print("Goal reached at ("); out.print(pose.x); out.print(','); out.print(pose.y); out.println("). Returning while mapping.");
+      out.print("Goal reached at ("); out.print(pose.x); out.print(','); out.print(pose.y);
+      out.print("). Retracing "); out.print(remainingMoves); out.println(" outbound moves in reverse.");
       returning = true;
     }
 
-    if (returning && pose.x == 0 && pose.y == 0) {
+    // Log the wall decisions already recorded by senseCurrentCell(), without
+    // taking extra sensor readings that could disagree with this decision.
+    out.print("EXPLORE step="); out.print(step); out.print(' '); printPose();
+    const Heading observedDirs[3] = {
+      turnLeft(pose.heading), pose.heading, turnRight(pose.heading)
+    };
+    const char *relativeNames[3] = {" L=", " F=", " R="};
+    for (uint8_t i = 0; i < 3; ++i) {
+      out.print(relativeNames[i]);
+      out.print(_map.hasWall(pose.x, pose.y, observedDirs[i]) ? "W" : "OPEN");
+    }
+    out.println();
+
+    // Do not finish at an intermediate visit to START inside an outbound loop.
+    if (returning && remainingMoves == 0) {
+      if (pose.x != 0 || pose.y != 0) {
+        out.println("Return failed: move history ended away from START.");
+        dumpStopMap();
+        return false;
+      }
       StoredMaze stored;
       _map.exportTo(stored);
       if (!_map.buildShortestPath(stored.path, stored.pathLen, stored.goalX, stored.goalY)) {
         out.println("Exploration completed, but no fully-known shortest path could be built.");
+        dumpStopMap();
         return false;
       }
       out.print("Shortest confirmed path length: "); out.print(stored.pathLen); out.println(" cells");
+      dumpStopMap();
       return _storage.save(stored, out);
     }
 
     Heading next;
-    if (!_map.chooseNext(pose, returning, next)) {
+    if (returning) {
+      next = opposite(static_cast<Heading>(outboundMoves[remainingMoves - 1]));
+    } else if (remainingMoves >= MAX_EXPLORE_MOVES) {
+      out.println("Exploration stopped: outbound move history limit reached before goal.");
+      dumpStopMap();
+      return false;
+    } else if (!_map.chooseNext(pose, false, next)) {
       out.println("Exploration failed: no reachable next cell.");
+      out.println("Planner found no neighbouring cell with a route to the target in the current map.");
+      dumpStopMap();
       return false;
     }
+    out.print(returning ? "RETRACE -> " : "CHOOSE -> ");
+    out.println(headingNames[(uint8_t)next & 3]);
     _map.setWall(pose.x, pose.y, next, false);
     if (!stepPose(pose, next, pwm)) {
       out.println("Exploration motion failed or was killed.");
+      out.println("Motion may be incomplete; recorded pose may differ from physical position.");
+      dumpStopMap();
       return false;
     }
+    // Record/pop only completed cell movements; retain all outbound detours.
+    if (returning) --remainingMoves;
+    else outboundMoves[remainingMoves++] = static_cast<uint8_t>(next);
   }
 
   out.println("Exploration stopped: step safety limit reached.");
+  dumpStopMap();
   return false;
 }
 

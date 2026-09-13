@@ -49,7 +49,10 @@ Before a fresh home exploration:
 7. reposition at START facing North, then select Fast mode and press Key1.
 
 `explore` (or Exploration DIP mode `111`) starts at (0,0), facing North,
-targets only (6,6), returns to (0,0), and saves the confirmed shortest route.
+targets only (6,6), retraces every outbound move in reverse to (0,0), and saves
+the confirmed shortest route for Fast mode. The return includes outbound detours
+and uses recorded moves rather than choosing a new route. Up to 700 outbound
+moves and their 700 reverse moves are allowed; logs show `RETRACE ->` on return.
 Goal coordinates are `MAZE_GOAL_X/Y` in `include/Config.h`. Storage version 3
 rejects maps/routes saved for the previous goal; run exploration before Fast mode.
 
