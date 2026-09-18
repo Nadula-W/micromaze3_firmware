@@ -109,9 +109,10 @@ constexpr uint16_t FRONT_PREALIGN_MM = 92; // travel almost to target; final ali
 constexpr uint16_t FRONT_PREALIGN_MIN_PROGRESS_MM = 45;
 constexpr uint16_t FRONT_REFERENCE_CONFIRM_SAMPLES = 2;
 constexpr uint16_t FRONT_MAX_EXTRA_TRAVEL_MM = 90;
-constexpr uint16_t FRONT_REFERENCE_TOL_MM = 3; // front reference while driving
-constexpr uint16_t FRONT_ALIGN_TOL_MM = 15; // stopped alignment: 65-95 mm at 80 mm target
-constexpr uint16_t FRONT_SQUARE_TOL_MM = 6;
+constexpr uint16_t FRONT_REFERENCE_TOL_MM = 3;
+
+constexpr uint16_t FRONT_ALIGN_TOL_MM = 5;
+constexpr uint16_t FRONT_SQUARE_TOL_MM = 5;// stopped alignment: 65-95 mm at 80 mm target
 // Grid-phase localization from a visible wall.  At a true cell centre the front
 // sensor should read FRONT_TURN_TARGET_MM + N*CELL_MM.  While a cell move is in
 // progress we add encoder progress back to the live front reading to estimate
