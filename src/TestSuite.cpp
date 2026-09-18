@@ -117,14 +117,16 @@ void TestSuite::testToF(Print &out, uint16_t seconds) {
     out.print(" age=");
     if (s.stampMs == 0) out.println("NO-DATA");
     else { out.print(millis() - s.stampMs); out.println("ms"); }
-    const uint8_t fr = SensorMap::FRONT_RIGHT;
-    out.print("  S4/FR readyAPI="); out.print((int)s.readyApi[fr]);
-    out.print(" readAPI="); out.print((int)s.readApi[fr]);
-    out.print(" range="); out.print(s.rangeStatus[fr]);
-    out.print(" raw="); out.print(s.rawMm[fr]);
-    out.print(" readAge=");
-    if (s.readStampMs[fr] == 0) out.println("NO-DATA");
-    else { out.print(millis() - s.readStampMs[fr]); out.println("ms"); }
+    out.println("  Per-sensor diagnostics: idx readAPI range raw readAge");
+    for (uint8_t i = 0; i < 4; ++i) {
+      out.print("    S"); out.print(i + 1);
+      out.print(" readAPI="); out.print((int)s.readApi[i]);
+      out.print(" range="); out.print(s.rangeStatus[i]);
+      out.print(" raw="); out.print(s.rawMm[i]);
+      out.print(" readAge=");
+      if (s.readStampMs[i] == 0) out.println("NO-DATA");
+      else { out.print(millis() - s.readStampMs[i]); out.println("ms"); }
+    }
     delay(200);
   }
   out.println("ToF live test complete.");

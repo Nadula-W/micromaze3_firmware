@@ -246,7 +246,15 @@ void DistanceArray::readAll(SensorSnapshot &out) {
 
     const bool ready = _sensor[i].isRangeComplete();
     out.readyApi[i] = (int8_t)_sensor[i].Status;
-    if (!ready) continue;
+    if (!ready) {
+      // Never let an old successful range remain valid forever. A missing/new
+      // ToF sample for too long is safer to treat as UNKNOWN than as a wall.
+      if (out.readStampMs[i] != 0 && millis() - out.readStampMs[i] > TOF_STALE_MS) {
+        out.mm[i] = 8190;
+        out.valid[i] = false;
+      }
+      continue;
+    }
 
     const uint16_t mm = _sensor[i].readRangeResult();
     out.readApi[i] = (int8_t)_sensor[i].Status;
@@ -258,7 +266,9 @@ void DistanceArray::readAll(SensorSnapshot &out) {
 
     // Adafruit/ST can return sentinel values such as 8191/65535 for bad or
     // out-of-range measurements.  Treat those as invalid rather than as walls.
-    const bool good = (rangeStatus != 4) && (mm > 0) && (mm < 4000) && (mm != 0xFFFFu);
+    const bool good = (out.readApi[i] == 0) &&
+                      (rangeStatus != 4) &&
+                      (mm > 0) && (mm < 4000) && (mm != 0xFFFFu);
     out.mm[i] = good ? mm : 8190;
     out.valid[i] = good;
     anyFresh = true;

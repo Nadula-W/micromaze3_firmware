@@ -1,0 +1,68 @@
+MICROMAZE COMPETITION PATCH - QUICK SETUP
+
+IMPORTANT: This patch intentionally keeps MAZE_N = 10 for your current test maze.
+
+1) REAL HARDWARE CHANGE
+   XSHUT_4 is now GPIO6 (not GPIO18).
+
+2) FRONT SENSOR OFFSETS
+   Config.h now contains:
+     FRONT_LEFT_OFFSET_MM
+     FRONT_RIGHT_OFFSET_MM
+   They are intentionally 0 until you measure the robot.
+
+   Put the robot perfectly square to a flat wall and run `tof`.
+   Average 10-20 readings for sensor 0 (FRONT_LEFT) and sensor 3 (FRONT_RIGHT).
+   Example: FL=88 mm, FR=78 mm -> difference=10 mm.
+   Use symmetric correction: FL=-5, FR=+5.
+   Then reflash.
+
+3) FRONT TARGET
+   FRONT_DOCK_TRIGGER_MM = 150 mm.
+   FRONT_PREALIGN_MM = 92 mm.
+   FRONT_TURN_TARGET_MM is still 80 mm because the real value must be measured on your chassis.
+   If 80 mm is not the true cell-center reference, put the robot at the correct cell center,
+   read the corrected FL/FR average, and set FRONT_TURN_TARGET_MM to that average.
+
+4) TOF ERROR HANDLING
+   - readAPI must succeed before a range becomes valid.
+   - old readings become invalid after 180 ms.
+   - front docking/alignment requires BOTH front sensors fresh/valid.
+   - one front sensor may only cause an emergency stop when extremely close.
+   - DFS/exploration post-movement wait increased from 35 ms to 100 ms.
+
+5) STRAIGHT PID
+   PID now uses real dt for I and D.
+   Single-wall correction is reduced/clamped to prevent an opening from causing a steering spike.
+   SIDE_ESCAPE_BOOST reduced 28 -> 9.
+   For the first competition test, run:
+     pid 1.0 0 0
+     savecal
+   Tune ONLY Kp first (e.g. 0.8, 1.0, 1.2, 1.4). Keep Ki=Kd=0 until stable.
+
+6) LEFT/RIGHT TURN CALIBRATION
+   Config.h now has separate:
+     TURN_LEFT_90_TICKS = 378
+     TURN_RIGHT_90_TICKS = 378
+   Test:
+     turn_ticks 378       (left)
+     turn_ticks -378      (right)
+   If actual angle is A degrees:
+     newTicks = oldTicks * 90 / A
+   Example: 378 gives 84 deg -> 405 ticks.
+   Set left and right independently.
+   Encoder turns now slow down near the target to reduce overshoot.
+
+7) TOF DIAGNOSTICS
+   `tof` now prints readAPI/range/raw/readAge for ALL 4 sensors.
+   If a sensor shows ERR, do not use that reading for alignment or maze topology.
+
+8) FAST TEST ORDER
+   a) tof (verify 4 sensors, no repeated ERR)
+   b) set front offsets and FRONT_TURN_TARGET_MM
+   c) pid 1.0 0 0 ; savecal
+   d) turn_ticks left/right x5 each; set separate tick values
+   e) one-cell straight x5
+   f) dfs_test in a small maze section
+
+This package was statically reviewed and patched, but it could not be compiled in this environment because PlatformIO/toolchains were not available offline. Compile once in your normal PlatformIO setup before flashing.

@@ -351,7 +351,7 @@ bool MazeNavigator::stepPose(Pose &pose, Heading next, int pwm) {
 bool MazeNavigator::deadEndReturnTest(int pwm, Print &out) {
   out.println("\n=== SAMPLE DEAD-END / RETURN TEST ===");
   out.println("Purpose: follow the simple home maze until a dead end, then retrace every cell back to start.");
-  out.print("Navigation turns use calibrated encoder pivots: 90deg = "); out.print(TURN_90_TICKS); out.println(" average wheel ticks.");
+  out.print("Navigation turns use calibrated encoder pivots: 90deg = "); out.print(TURN_LEFT_90_TICKS); out.print(" left / "); out.print(TURN_RIGHT_90_TICKS); out.println(" right average wheel ticks.");
   out.println("Keep Key2 ready. The test stops after 24 outbound cells for safety.");
 
   Pose pose;
@@ -434,7 +434,7 @@ bool MazeNavigator::homeDfsTest(int pwm, Print &out) {
   out.println("Explores unknown branches, backtracks at dead ends, then returns to START.");
   out.println("Use a closed maze. Start at (0,0), facing North (+y), with the maze extending right (+x).");
   out.print("Maze size: "); out.print(MAZE_N); out.print('x'); out.println(MAZE_N);
-  out.print("Navigation: cell="); out.print(CELL_MM, 0); out.print(" mm, 90deg pivot="); out.print(TURN_90_TICKS); out.println(" encoder ticks. Key2 = emergency stop.");
+  out.print("Navigation: cell="); out.print(CELL_MM, 0); out.print(" mm, 90deg pivot="); out.print(TURN_LEFT_90_TICKS); out.print("L/"); out.print(TURN_RIGHT_90_TICKS); out.println("R encoder ticks. Key2 = emergency stop.");
 
   // Use the same coordinates and bounds as stepPose() / MazeMap.
   constexpr int N = 10;
@@ -475,7 +475,7 @@ constexpr uint16_t MAX_ACTIONS = 300;
   out.print("DFS drive PWM="); out.print(navPwm); out.println(" (same as cell)");
 
   for (uint16_t action = 0; action < MAX_ACTIONS; ++action) {
-    delay(35); // ToF task runs every 20 ms; one fresh sample is enough before the decision.
+    delay(100); // VL53L0X continuous period is 50 ms; allow a fresh post-turn frame.
     const bool wallL = _motion.wallLeft();
     const bool wallF = _motion.wallFront();
     const bool wallR = _motion.wallRight();
@@ -608,7 +608,7 @@ bool MazeNavigator::explorationRun(int pwm, Print &out) {
 
   // Allow the full outbound budget, every reverse move, and the final check.
   for (uint16_t step = 0; step <= 2 * MAX_EXPLORE_MOVES; ++step) {
-    delay(35); // let ToF snapshot settle after a movement/turn
+    delay(100); // VL53L0X continuous period is 50 ms; allow fresh post-movement readings
     _map.senseCurrentCell(pose, _motion);
 
     if (!returning && _map.isGoal(pose.x, pose.y)) {

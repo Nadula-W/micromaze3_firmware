@@ -66,9 +66,9 @@ struct CalibrationData {
   // now maps directly to Kp, Ki, Kd used by cell/DFS straight driving.
   // The three floats remain in the same place in this struct, so all other
   // saved calibration fields keep the same binary layout as v32.
-  float pidKp = 1.8f;
+  float pidKp = 1.0f;
   float pidKi = 0.0f;
-  float pidKd = 0.03f;
+  float pidKd = 0.0f;
 
   // Appended so existing calibration can load with default front gains.
   float frontKp = FRONT_ALIGN_KP;

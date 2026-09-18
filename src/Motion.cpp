@@ -3,6 +3,29 @@
 
 namespace MM3 {
 
+namespace {
+constexpr bool PID_TRACE_ENABLED = true;
+constexpr uint32_t PID_TRACE_PERIOD_MS = 250; // keep low-rate so Serial does not disturb control timing
+
+uint16_t correctedFrontMm(const SensorSnapshot &s, uint8_t index, int16_t offset) {
+  if (index >= 4 || !s.valid[index]) return 8190;
+  int value = (int)s.mm[index] + (int)offset;
+  return (uint16_t)constrain(value, 1, 8189);
+}
+
+bool tofFresh(const SensorSnapshot &s, uint8_t index, uint32_t now = millis()) {
+  return index < 4 && s.valid[index] && s.readStampMs[index] != 0 &&
+         now - s.readStampMs[index] <= TOF_STALE_MS;
+}
+
+uint32_t pairedFrontStamp(const SensorSnapshot &s) {
+  const uint8_t fl = SensorMap::FRONT_LEFT;
+  const uint8_t fr = SensorMap::FRONT_RIGHT;
+  if (s.readStampMs[fl] == 0 || s.readStampMs[fr] == 0) return 0;
+  return min(s.readStampMs[fl], s.readStampMs[fr]);
+}
+}
+
 bool MotionController::calibrationReady() const {
   return isfinite(_cal.ticksPerMmLeft) && isfinite(_cal.ticksPerMmRight) &&
          _cal.ticksPerMmLeft > 0.01f && _cal.ticksPerMmRight > 0.01f && _imu.present();
@@ -10,7 +33,7 @@ bool MotionController::calibrationReady() const {
 
 bool MotionController::wallByIndex(uint8_t index) const {
   SensorSnapshot s = _sensors.snapshot();
-  if (index >= 4 || !s.valid[index]) return false;
+  if (index >= 4 || !tofFresh(s, index)) return false;
   return s.mm[index] < _cal.wallThresholdMm[index];
 }
 
@@ -21,24 +44,39 @@ bool MotionController::wallFront() const {
   SensorSnapshot s = _sensors.snapshot();
   const uint8_t a = SensorMap::FRONT_LEFT;
   const uint8_t b = SensorMap::FRONT_RIGHT;
-  bool wa = s.valid[a] && s.mm[a] < _cal.wallThresholdMm[a];
-  bool wb = s.valid[b] && s.mm[b] < _cal.wallThresholdMm[b];
-  // Either front sensor seeing a close wall is enough to stop a maze move.
-  return wa || wb;
+  const uint32_t now = millis();
+  const bool av = tofFresh(s, a, now);
+  const bool bv = tofFresh(s, b, now);
+  const uint16_t am = av ? correctedFrontMm(s, a, FRONT_LEFT_OFFSET_MM) : 8190;
+  const uint16_t bm = bv ? correctedFrontMm(s, b, FRONT_RIGHT_OFFSET_MM) : 8190;
+
+  // Maze topology: require BOTH front sensors to agree. One sensor by itself can
+  // see a post/edge or produce a transient ToF error and create a false dead end.
+  bool normalWall = av && bv &&
+                    am < _cal.wallThresholdMm[a] &&
+                    bm < _cal.wallThresholdMm[b];
+
+  // Collision safety stays conservative: either sensor extremely close stops us.
+  bool emergency = (av && am < COLLISION_STOP_MM + 12) ||
+                   (bv && bm < COLLISION_STOP_MM + 12);
+  return normalWall || emergency;
 }
 
 uint16_t MotionController::distanceLeft() const {
   SensorSnapshot s = _sensors.snapshot();
-  return s.valid[SensorMap::LEFT] ? s.mm[SensorMap::LEFT] : 8190;
+  return tofFresh(s, SensorMap::LEFT) ? s.mm[SensorMap::LEFT] : 8190;
 }
 uint16_t MotionController::distanceRight() const {
   SensorSnapshot s = _sensors.snapshot();
-  return s.valid[SensorMap::RIGHT] ? s.mm[SensorMap::RIGHT] : 8190;
+  return tofFresh(s, SensorMap::RIGHT) ? s.mm[SensorMap::RIGHT] : 8190;
 }
 uint16_t MotionController::distanceFront() const {
   SensorSnapshot s = _sensors.snapshot();
-  uint16_t a = s.valid[SensorMap::FRONT_LEFT] ? s.mm[SensorMap::FRONT_LEFT] : 8190;
-  uint16_t b = s.valid[SensorMap::FRONT_RIGHT] ? s.mm[SensorMap::FRONT_RIGHT] : 8190;
+  const uint32_t now = millis();
+  const uint8_t fl = SensorMap::FRONT_LEFT;
+  const uint8_t fr = SensorMap::FRONT_RIGHT;
+  uint16_t a = tofFresh(s, fl, now) ? correctedFrontMm(s, fl, FRONT_LEFT_OFFSET_MM) : 8190;
+  uint16_t b = tofFresh(s, fr, now) ? correctedFrontMm(s, fr, FRONT_RIGHT_OFFSET_MM) : 8190;
   if (a == 8190) return b;
   if (b == 8190) return a;
   return (uint16_t)((a + b) / 2u);
@@ -57,11 +95,15 @@ float MotionController::wallSteeringErrorMm(const SensorSnapshot &s) const {
     float rErr = (float)s.mm[ri] - _cal.sideTargetRightMm;
     return (lErr - rErr) * 0.5f;
   }
+  // When one wall disappears at an opening, do not suddenly give the remaining
+  // wall full control. That step change was a major source of left-right wobble.
   if (lwall && _cal.sideTargetLeftMm) {
-    return (float)s.mm[li] - _cal.sideTargetLeftMm;
+    float e = ((float)s.mm[li] - _cal.sideTargetLeftMm) * 0.35f;
+    return constrain(e, -8.0f, 8.0f);
   }
   if (rwall && _cal.sideTargetRightMm) {
-    return -((float)s.mm[ri] - _cal.sideTargetRightMm);
+    float e = -((float)s.mm[ri] - _cal.sideTargetRightMm) * 0.35f;
+    return constrain(e, -8.0f, 8.0f);
   }
   return 0.0f;
 }
@@ -109,6 +151,13 @@ bool MotionController::driveDistanceMm(float distanceMm, int basePwm, bool useWa
   float pidIntegral = 0.0f;
   float pidPrevError = 0.0f;
   bool pidHasPrev = false;
+  uint32_t lastPidUs = micros();
+  uint32_t lastPidTraceMs = 0;
+  if (PID_TRACE_ENABLED) {
+    Serial.printf("[PID DRIVE ACTIVE] target=%.1fmm pwm=%d wallCenter=%s Kp=%.3f Ki=%.3f Kd=%.3f\n",
+                  target, basePwm, useWallCentering ? "ON" : "OFF",
+                  _cal.pidKp, _cal.pidKi, _cal.pidKd);
+  }
 
   while (!killed() && millis() - startMs < timeoutMs) {
     int32_t dL = _motors.leftTicks() - startL;
@@ -145,6 +194,7 @@ bool MotionController::driveDistanceMm(float distanceMm, int basePwm, bool useWa
     // Encoder synchronization error. If side-wall centering is available, its
     // raw error is added below. ONE Kp/Ki/Kd controller handles the result.
     float syncErrMm = leftMm - rightMm;
+    float wallErrMm = 0.0f;
     float driveErrorMm = syncErrMm;
     int correction = 0;
 
@@ -154,7 +204,8 @@ bool MotionController::driveDistanceMm(float distanceMm, int basePwm, bool useWa
 
     if (direction > 0 && useWallCentering) {
       SensorSnapshot s = _sensors.snapshot();
-      driveErrorMm += wallSteeringErrorMm(s);
+      wallErrMm = wallSteeringErrorMm(s);
+      driveErrorMm += wallErrMm;
 
       // Strong side-wall escape if the chassis is already too close.
       const uint8_t sli = SensorMap::LEFT;
@@ -171,13 +222,21 @@ bool MotionController::driveDistanceMm(float distanceMm, int basePwm, bool useWa
       // CONTINUOUS front-wall tracking.  Do not stop merely because the encoder
       // says 192 mm if a real front wall is already visible.  In that situation
       // the physical 80 mm wall distance is the stronger longitudinal reference.
-      uint16_t f1 = s.valid[SensorMap::FRONT_LEFT] ? s.mm[SensorMap::FRONT_LEFT] : 8190;
-      uint16_t f2 = s.valid[SensorMap::FRONT_RIGHT] ? s.mm[SensorMap::FRONT_RIGHT] : 8190;
+      const uint8_t fl = SensorMap::FRONT_LEFT;
+      const uint8_t fr = SensorMap::FRONT_RIGHT;
+      const uint32_t nowMs = millis();
+      const bool flFresh = tofFresh(s, fl, nowMs);
+      const bool frFresh = tofFresh(s, fr, nowMs);
+      uint16_t f1 = flFresh ? correctedFrontMm(s, fl, FRONT_LEFT_OFFSET_MM) : 8190;
+      uint16_t f2 = frFresh ? correctedFrontMm(s, fr, FRONT_RIGHT_OFFSET_MM) : 8190;
       bool bothFrontValid = (f1 < 8190 && f2 < 8190);
       bool anyFrontValid = (f1 < 8190 || f2 < 8190);
       uint16_t frontDiff = bothFrontValid ? (uint16_t)abs((int)f1 - (int)f2) : 999u;
       frontAvg = bothFrontValid ? (uint16_t)((f1 + f2) / 2u) : min(f1, f2);
-      bool frontLooksUsable = anyFrontValid && (!bothFrontValid || frontDiff <= 40u);
+      // Docking/localization needs a coherent PAIR. One valid front sensor is
+      // kept only for emergency collision protection.
+      bool frontLooksUsable = bothFrontValid && frontDiff <= 45u;
+      const uint32_t frontPairStamp = frontLooksUsable ? pairedFrontStamp(s) : 0;
 
       // Infer the real grid phase from the front wall whenever line-of-sight to a
       // wall exists.  If we have already moved avgMm, then frontAvg + avgMm is an
@@ -200,7 +259,7 @@ bool MotionController::driveDistanceMm(float distanceMm, int basePwm, bool useWa
         bool candidateOkay = n >= 1 && phaseErr <= FRONT_LOCALIZE_PHASE_TOL_MM;
         if (!latticeLocked && candidateOkay) {
           if (n == latticeCandidateIndex) {
-            if (s.stampMs != lastFrontStamp && latticeCandidateSamples < 10)
+            if (frontPairStamp != 0 && frontPairStamp != lastFrontStamp && latticeCandidateSamples < 10)
               ++latticeCandidateSamples;
           } else {
             latticeCandidateIndex = n;
@@ -222,7 +281,7 @@ bool MotionController::driveDistanceMm(float distanceMm, int basePwm, bool useWa
         if (latticeLocked) {
           float physicalRemaining = (float)frontAvg - latticeTargetFrontMm;
           if (physicalRemaining <= FRONT_REFERENCE_TOL_MM) {
-            if (s.stampMs != lastFrontStamp) {
+            if (frontPairStamp != 0 && frontPairStamp != lastFrontStamp) {
               if (latticeStopSamples < 10) ++latticeStopSamples;
             }
             if (latticeStopSamples >= FRONT_REFERENCE_CONFIRM_SAMPLES) {
@@ -246,8 +305,8 @@ bool MotionController::driveDistanceMm(float distanceMm, int basePwm, bool useWa
                        frontAvg <= FRONT_DOCK_TRIGGER_MM &&
                        avgMm >= target * 0.55f;
 
-      if (s.stampMs != lastFrontStamp) {
-        lastFrontStamp = s.stampMs;
+      if (frontPairStamp != 0 && frontPairStamp != lastFrontStamp) {
+        lastFrontStamp = frontPairStamp;
         if (frontCandidate) {
           if (frontNearSamples < 10) ++frontNearSamples;
         } else {
@@ -289,18 +348,30 @@ bool MotionController::driveDistanceMm(float distanceMm, int basePwm, bool useWa
       }
     }
 
-    // True discrete PID steering. This is the ONLY normal steering gain path.
-    // P = current error, I = accumulated error, D = change in error.
-    pidIntegral += driveErrorMm;
-    pidIntegral = constrain(pidIntegral, -250.0f, 250.0f);
-    float pidDerivative = pidHasPrev ? (driveErrorMm - pidPrevError) : 0.0f;
-    float pidOutput = _cal.pidKp * driveErrorMm +
-                      _cal.pidKi * pidIntegral +
-                      _cal.pidKd * pidDerivative;
+    // Time-correct PID. The old implementation omitted dt, so I/D gains changed
+    // whenever Wi-Fi/serial/sensor scheduling changed the loop period.
+    uint32_t pidNowUs = micros();
+    float pidDt = (pidNowUs - lastPidUs) * 1e-6f;
+    lastPidUs = pidNowUs;
+    pidDt = constrain(pidDt, 0.001f, 0.050f);
+    pidIntegral += driveErrorMm * pidDt;
+    pidIntegral = constrain(pidIntegral, -40.0f, 40.0f);
+    float pidDerivative = pidHasPrev ? (driveErrorMm - pidPrevError) / pidDt : 0.0f;
+    float pTerm = _cal.pidKp * driveErrorMm;
+    float iTerm = _cal.pidKi * pidIntegral;
+    float dTerm = _cal.pidKd * pidDerivative;
+    float pidOutput = pTerm + iTerm + dTerm;
     correction += constrain((int)lroundf(pidOutput), -55, 55);
     correction = constrain(correction, -78, 78);
     pidPrevError = driveErrorMm;
     pidHasPrev = true;
+
+    if (PID_TRACE_ENABLED && millis() - lastPidTraceMs >= PID_TRACE_PERIOD_MS) {
+      lastPidTraceMs = millis();
+      Serial.printf("[PID DRIVE] prog=%.1f err=%.2f enc=%.2f wall=%.2f P=%.2f I=%.2f D=%.2f out=%.2f corr=%d\n",
+                    avgMm, driveErrorMm, syncErrMm, wallErrMm,
+                    pTerm, iTerm, dTerm, pidOutput, correction);
+    }
 
     const bool encoderDone =
         avgMm >= target && leftMm >= target * 0.94f && rightMm >= target * 0.94f;
@@ -370,6 +441,9 @@ bool MotionController::driveDistanceMm(float distanceMm, int basePwm, bool useWa
   }
 
   _motors.stop(true);
+  if (PID_TRACE_ENABLED) {
+    Serial.printf("[PID DRIVE END] result=%s\n", (success && !killed()) ? "OK" : "FAIL");
+  }
   return success && !killed();
 }
 
@@ -423,6 +497,13 @@ bool MotionController::driveAnchoredMazeCell(int basePwm, bool resetAnchor) {
   float pidIntegral = 0.0f;
   float pidPrevError = 0.0f;
   bool pidHasPrev = false;
+  uint32_t lastPidUs = micros();
+  uint32_t lastPidTraceMs = 0;
+  if (PID_TRACE_ENABLED) {
+    Serial.printf("[PID MAZE ACTIVE] cell=%u pwm=%d Kp=%.3f Ki=%.3f Kd=%.3f\n",
+                  (unsigned)_mazeAnchorCells, basePwm,
+                  _cal.pidKp, _cal.pidKi, _cal.pidKd);
+  }
 
   while (!killed() && millis() - startMs < timeoutMs) {
     int32_t dLticks = _motors.leftTicks() - _mazeAnchorLeftTicks;
@@ -469,13 +550,19 @@ bool MotionController::driveAnchoredMazeCell(int basePwm, bool resetAnchor) {
     float syncLeftMm = fabsf((float)syncDLticks) / _cal.ticksPerMmLeft;
     float syncRightMm = fabsf((float)syncDRticks) / _cal.ticksPerMmRight;
     float syncErrMm = syncLeftMm - syncRightMm;
-    float driveErrorMm = syncErrMm + wallSteeringErrorMm(snap);
-    pidIntegral += driveErrorMm;
-    pidIntegral = constrain(pidIntegral, -250.0f, 250.0f);
-    float pidDerivative = pidHasPrev ? (driveErrorMm - pidPrevError) : 0.0f;
-    float pidOutput = _cal.pidKp * driveErrorMm +
-                      _cal.pidKi * pidIntegral +
-                      _cal.pidKd * pidDerivative;
+    float wallErrMm = wallSteeringErrorMm(snap);
+    float driveErrorMm = syncErrMm + wallErrMm;
+    uint32_t pidNowUs = micros();
+    float pidDt = (pidNowUs - lastPidUs) * 1e-6f;
+    lastPidUs = pidNowUs;
+    pidDt = constrain(pidDt, 0.001f, 0.050f);
+    pidIntegral += driveErrorMm * pidDt;
+    pidIntegral = constrain(pidIntegral, -40.0f, 40.0f);
+    float pidDerivative = pidHasPrev ? (driveErrorMm - pidPrevError) / pidDt : 0.0f;
+    float pTerm = _cal.pidKp * driveErrorMm;
+    float iTerm = _cal.pidKi * pidIntegral;
+    float dTerm = _cal.pidKd * pidDerivative;
+    float pidOutput = pTerm + iTerm + dTerm;
     int correction = constrain((int)lroundf(pidOutput), -55, 55);
     pidPrevError = driveErrorMm;
     pidHasPrev = true;
@@ -492,20 +579,42 @@ bool MotionController::driveAnchoredMazeCell(int basePwm, bool resetAnchor) {
     }
     correction = constrain(correction, -78, 78);
 
+    if (PID_TRACE_ENABLED && millis() - lastPidTraceMs >= PID_TRACE_PERIOD_MS) {
+      lastPidTraceMs = millis();
+      Serial.printf("[PID MAZE] cell=%u prog=%.1f err=%.2f enc=%.2f wall=%.2f P=%.2f I=%.2f D=%.2f out=%.2f corr=%d\n",
+                    (unsigned)_mazeAnchorCells, thisCellProgressMm, driveErrorMm,
+                    syncErrMm, wallErrMm, pTerm, iTerm, dTerm, pidOutput, correction);
+    }
+
     // Front wall is a SAFETY / physical-centre correction, not a lattice-phase
     // estimator.  v27 tried to infer the cell index from a late ToF reading and
     // could incorrectly snap a multi-cell corridor to one cell.  Here we simply
     // brake before the wall and let front_align finish gently at 80 mm.
-    uint16_t f1 = snap.valid[SensorMap::FRONT_LEFT] ? snap.mm[SensorMap::FRONT_LEFT] : 8190;
-    uint16_t f2 = snap.valid[SensorMap::FRONT_RIGHT] ? snap.mm[SensorMap::FRONT_RIGHT] : 8190;
+    const uint8_t fl = SensorMap::FRONT_LEFT;
+    const uint8_t fr = SensorMap::FRONT_RIGHT;
+    const uint32_t nowMs = millis();
+    const bool flFresh = tofFresh(snap, fl, nowMs);
+    const bool frFresh = tofFresh(snap, fr, nowMs);
+    uint16_t f1 = flFresh ? correctedFrontMm(snap, fl, FRONT_LEFT_OFFSET_MM) : 8190;
+    uint16_t f2 = frFresh ? correctedFrontMm(snap, fr, FRONT_RIGHT_OFFSET_MM) : 8190;
     bool anyFront = (f1 < 8190 || f2 < 8190);
     bool bothFront = (f1 < 8190 && f2 < 8190);
     uint16_t frontDiff = bothFront ? (uint16_t)abs((int)f1 - (int)f2) : 999u;
     uint16_t frontAvg = bothFront ? (uint16_t)((f1 + f2) / 2u) : min(f1, f2);
-    bool frontUsable = anyFront && (!bothFront || frontDiff <= 45u);
+    bool frontUsable = bothFront && frontDiff <= 45u;
+    const uint32_t frontPairStamp = frontUsable ? pairedFrontStamp(snap) : 0;
 
-    if (snap.stampMs != lastFrontStamp) {
-      lastFrontStamp = snap.stampMs;
+    // A single front sensor is never enough for maze docking, but it is enough
+    // to stop an imminent collision.
+    if (anyFront && min(f1, f2) < COLLISION_STOP_MM) {
+      _motors.stop(true);
+      Serial.println("MOVE ABORT: emergency front ToF collision guard.");
+      success = false;
+      break;
+    }
+
+    if (frontPairStamp != 0 && frontPairStamp != lastFrontStamp) {
+      lastFrontStamp = frontPairStamp;
       if (frontUsable && frontAvg <= FRONT_PREALIGN_MM) {
         if (frontCloseSamples < 10) ++frontCloseSamples;
       } else {
@@ -576,6 +685,10 @@ bool MotionController::driveAnchoredMazeCell(int basePwm, bool resetAnchor) {
   }
 
   _motors.stop(true);
+  if (PID_TRACE_ENABLED) {
+    Serial.printf("[PID MAZE END] cell=%u result=%s\n",
+                  (unsigned)_mazeAnchorCells, (!success || killed()) ? "FAIL" : "OK");
+  }
   if (!success || killed()) return false;
 
   if (requestFrontAlign) {
@@ -643,6 +756,7 @@ bool MotionController::turnDegrees(float degrees, int maxPwm) {
 }
 
 bool MotionController::turnEncoderTicks(int32_t signedTicks, int pwm) {
+  if (PID_TRACE_ENABLED) Serial.println("[PID OFF] encoder-only turn; no PID is used here");
   if (signedTicks == 0) return true;
   const int dir = signedTicks > 0 ? +1 : -1;
   const int32_t target = labs(signedTicks);
@@ -660,10 +774,16 @@ bool MotionController::turnEncoderTicks(int32_t signedTicks, int pwm) {
       return !killed();
     }
 
+    // Decelerate near the target to reduce battery/friction-dependent overshoot.
+    int32_t remainingTicks = target - avg;
+    int turnPwm = pwm;
+    if (remainingTicks < 90) turnPwm = min(turnPwm, MIN_MOVE_PWM + 10);
+    if (remainingTicks < 40) turnPwm = MIN_MOVE_PWM;
+
     // Keep both wheels contributing approximately the same pivot distance.
-    int sync = (int)constrain((long)(l - r) / 10L, -16L, 16L);
-    int lp = constrain(pwm - sync, MIN_MOVE_PWM, 100);
-    int rp = constrain(pwm + sync, MIN_MOVE_PWM, 100);
+    int sync = (int)constrain((long)(l - r) / 10L, -14L, 14L);
+    int lp = constrain(turnPwm - sync, MIN_MOVE_PWM, 100);
+    int rp = constrain(turnPwm + sync, MIN_MOVE_PWM, 100);
     _motors.setWheels(-dir * lp, dir * rp);
     delay(2);
   }
@@ -735,9 +855,10 @@ bool MotionController::alignFrontToWall(uint16_t targetMm, int maxPwm) {
   Serial.print("FRONT ALIGN target=");
   Serial.print(targetMm);
   Serial.println(" mm");
-  Serial.printf("Front PID=%.3f/%.3f/%.3f square PID=%.3f/%.3f/%.3f\n",
+  Serial.printf("[PID FRONT ACTIVE] distance(Kp/Ki/Kd)=%.3f/%.3f/%.3f square(Kp/Ki/Kd)=%.3f/%.3f/%.3f\n",
                 _cal.frontKp, _cal.frontKi, _cal.frontKd,
                 _cal.squareKp, _cal.squareKi, _cal.squareKd);
+  Serial.println("[PID FRONT] distance PID = forward/back, square PID = left/right squaring");
 
   while (!killed() && millis() - startMs < FRONT_ALIGN_TIMEOUT_MS) {
     uint32_t now = millis();
@@ -751,15 +872,18 @@ bool MotionController::alignFrontToWall(uint16_t targetMm, int maxPwm) {
     const uint8_t li = SensorMap::FRONT_LEFT;
     const uint8_t ri = SensorMap::FRONT_RIGHT;
 
-    bool lv = s.valid[li] && s.mm[li] < 8190;
-    bool rv = s.valid[ri] && s.mm[ri] < 8190;
-    if ((!lv && !rv) || s.stampMs == 0 || now - s.stampMs > FRONT_ALIGN_STALE_MS) {
+    bool lv = tofFresh(s, li, now);
+    bool rv = tofFresh(s, ri, now);
+    // Squaring needs BOTH front sensors. If either sensor is ERR/stale, do not
+    // steer from a one-sided reading; wait briefly for a fresh pair instead.
+    if (!lv || !rv) {
       _motors.stop(true);
-      Serial.println("FRONT ALIGN failed: invalid or stale front-wall reading.");
-      return false;
+      stableSince = 0;
+      delay(2);
+      continue;
     }
 
-    uint8_t frontMask = (lv ? 1 : 0) | (rv ? 2 : 0);
+    uint8_t frontMask = 3;
     if (frontMask != previousFrontMask) {
       distancePid = AlignPid{};
       squarePid = AlignPid{};
@@ -767,9 +891,9 @@ bool MotionController::alignFrontToWall(uint16_t targetMm, int maxPwm) {
       previousFrontMask = frontMask;
     }
 
-    float left = lv ? (float)s.mm[li] : NAN;
-    float right = rv ? (float)s.mm[ri] : NAN;
-    float front = lv && rv ? 0.5f * (left + right) : (lv ? left : right);
+    float left = (float)correctedFrontMm(s, li, FRONT_LEFT_OFFSET_MM);
+    float right = (float)correctedFrontMm(s, ri, FRONT_RIGHT_OFFSET_MM);
+    float front = 0.5f * (left + right);
     float distErr = front - (float)targetMm; // + = too far -> move forward
     float squareErr = (lv && rv) ? (left - right) : 0.0f;
 
@@ -791,6 +915,7 @@ bool MotionController::alignFrontToWall(uint16_t targetMm, int maxPwm) {
         Serial.print(rv ? (int)right : -1);
         Serial.print(" avg=");
         Serial.println(front, 1);
+        Serial.println("[PID FRONT END] result=OK");
         return true;
       }
       continue;
@@ -849,6 +974,7 @@ bool MotionController::alignFrontToWall(uint16_t targetMm, int maxPwm) {
 
   _motors.stop(true);
   Serial.println(killed() ? "FRONT ALIGN stopped: Key2." : "FRONT ALIGN timeout: distance/squaring did not settle.");
+  Serial.println("[PID FRONT END] result=FAIL");
   Serial.println("ALIGN TRACE: ms FL FR distErr squareErr pwmL pwmR ticksL ticksR");
   for (size_t i = 0; i < traceCount; ++i) {
     const AlignSample &s = trace[i];
@@ -887,19 +1013,19 @@ bool MotionController::turnToHeading(Heading &current, Heading target, int maxPw
     ok = true;
   } else if (delta == 1) {
     // RIGHT 90 degrees.
-    ok = turnEncoderTicks(-TURN_90_TICKS);
+    ok = turnEncoderTicks(-TURN_RIGHT_90_TICKS);
     if (ok) delay(250);
   } else if (delta == 2) {
     // 180 degrees: two fully stopped calibrated 90-degree pivots.
-    ok = turnEncoderTicks(TURN_90_TICKS);
+    ok = turnEncoderTicks(TURN_LEFT_90_TICKS);
     if (ok) {
       delay(350);
-      ok = turnEncoderTicks(TURN_90_TICKS);
+      ok = turnEncoderTicks(TURN_LEFT_90_TICKS);
     }
     if (ok) delay(300);
   } else if (delta == 3) {
     // LEFT 90 degrees.
-    ok = turnEncoderTicks(TURN_90_TICKS);
+    ok = turnEncoderTicks(TURN_LEFT_90_TICKS);
     if (ok) delay(250);
   }
 

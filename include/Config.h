@@ -18,7 +18,7 @@ constexpr uint8_t DIST_SCL = 15;
 constexpr uint8_t XSHUT_1 = 4;
 constexpr uint8_t XSHUT_2 = 2;
 constexpr uint8_t XSHUT_3 = 16;
-constexpr uint8_t XSHUT_4 = 18;
+constexpr uint8_t XSHUT_4 = 6; // rewired on the real robot
 constexpr uint8_t XSHUT[4] = {XSHUT_1, XSHUT_2, XSHUT_3, XSHUT_4};
 
 constexpr uint8_t MOTOR_STBY = 42;
@@ -85,7 +85,10 @@ constexpr int SLOW_PWM = 90;
 constexpr int FAST_PWM = 155;
 constexpr int TURN_PWM = 105;
 // Calibrated on the real robot: encoder-only pivot is currently more reliable than MPU yaw.
-constexpr int32_t TURN_90_TICKS = 378;
+// Tune these independently with `turn_ticks <ticks>` (left) and
+// `turn_ticks -<ticks>` (right). Real drivetrains are asymmetric.
+constexpr int32_t TURN_LEFT_90_TICKS = 330;
+constexpr int32_t TURN_RIGHT_90_TICKS = 330;
 constexpr int ENCODER_TURN_PWM = 68;
 constexpr int MIN_MOVE_PWM = 58;
 constexpr uint16_t COLLISION_STOP_MM = 24;
@@ -93,16 +96,16 @@ constexpr uint16_t COLLISION_STOP_MM = 24;
 // Front-wall docking/alignment. Calibrate FRONT_TURN_TARGET_MM by placing the
 // robot at the true centre of a cell, facing a front wall, and reading F with
 // the `walls` command. This robot is currently calibrated to 80 mm.
-constexpr uint16_t FRONT_TURN_TARGET_MM = 80;
+constexpr uint16_t FRONT_TURN_TARGET_MM = 83;
 // Continuous front-wall reference. While driving, the controller watches the
 // front ToF continuously. If a stable front wall is acquired within this
 // distance, encoder distance becomes a coarse reference and the physical
 // FRONT_TURN_TARGET_MM becomes the final longitudinal stop reference.
-constexpr uint16_t FRONT_DOCK_TRIGGER_MM = 170;
+constexpr uint16_t FRONT_DOCK_TRIGGER_MM = 150;
 // Brake before the final 80 mm docking point, then let the slow front-align
 // controller finish the last few centimetres. This prevents a fast approach
 // from physically contacting the wall before the motors can stop.
-constexpr uint16_t FRONT_PREALIGN_MM = 105;
+constexpr uint16_t FRONT_PREALIGN_MM = 92; // travel almost to target; final align mainly squares the nose
 constexpr uint16_t FRONT_PREALIGN_MIN_PROGRESS_MM = 45;
 constexpr uint16_t FRONT_REFERENCE_CONFIRM_SAMPLES = 2;
 constexpr uint16_t FRONT_MAX_EXTRA_TRAVEL_MM = 90;
@@ -134,12 +137,19 @@ constexpr uint32_t FRONT_ALIGN_STALE_MS = 200;
 // Corridor anti-contact / stall recovery. These values are deliberately
 // conservative for the competition-deadline build.
 constexpr uint16_t SIDE_HARD_MARGIN_MM = 12;
-constexpr int SIDE_ESCAPE_BOOST = 28;
+constexpr int SIDE_ESCAPE_BOOST = 9;
 constexpr uint32_t DRIVE_STALL_MS = 550;
 constexpr uint8_t DRIVE_MAX_RECOVERIES = 2;
 constexpr int DRIVE_RECOVERY_PWM = 78;
 constexpr uint32_t DRIVE_RECOVERY_REVERSE_MS = 120;
 constexpr uint32_t SENSOR_PERIOD_MS = 20;
+constexpr uint32_t TOF_STALE_MS = 180;
+
+// Front ToF mounting/measurement offsets in millimetres.
+// Put the robot perfectly square to a wall, average 10-20 samples, then make
+// corrected FL and FR equal. Example: FL=88, FR=78 -> FL=-5, FR=+5.
+constexpr int16_t FRONT_LEFT_OFFSET_MM  = +10;
+constexpr int16_t FRONT_RIGHT_OFFSET_MM = -10;
 
 constexpr uint32_t COUNTDOWN_MS = 5000;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 35;
