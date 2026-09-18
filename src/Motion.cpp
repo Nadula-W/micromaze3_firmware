@@ -52,10 +52,14 @@ bool MotionController::wallFront() const {
 
   // Maze topology: require BOTH front sensors to agree. One sensor by itself can
   // see a post/edge or produce a transient ToF error and create a false dead end.
-  bool normalWall = av && bv &&
-                    am < _cal.wallThresholdMm[a] &&
-                    bm < _cal.wallThresholdMm[b];
+  uint16_t frontDiff =
+      av && bv ? (uint16_t)abs((int)am - (int)bm) : 999u;
 
+  bool normalWall =
+      av && bv &&
+      frontDiff <= 25u &&
+      am < _cal.wallThresholdMm[a] &&
+      bm < _cal.wallThresholdMm[b];
   // Collision safety stays conservative: either sensor extremely close stops us.
   bool emergency = (av && am < COLLISION_STOP_MM + 12) ||
                    (bv && bm < COLLISION_STOP_MM + 12);
@@ -83,29 +87,61 @@ uint16_t MotionController::distanceFront() const {
 }
 
 float MotionController::wallSteeringErrorMm(const SensorSnapshot &s) const {
-  const uint8_t li = SensorMap::LEFT;
-  const uint8_t ri = SensorMap::RIGHT;
-  bool lwall = s.valid[li] && s.mm[li] < _cal.wallThresholdMm[li];
-  bool rwall = s.valid[ri] && s.mm[ri] < _cal.wallThresholdMm[ri];
+    const uint8_t li = SensorMap::LEFT;
+    const uint8_t ri = SensorMap::RIGHT;
+    const uint32_t now = millis();
 
-  // RAW centering error only. There is no separate wall gain anymore.
-  // Positive error means steer left (left wheel slower, right wheel faster).
-  if (lwall && rwall && _cal.sideTargetLeftMm && _cal.sideTargetRightMm) {
-    float lErr = (float)s.mm[li] - _cal.sideTargetLeftMm;
-    float rErr = (float)s.mm[ri] - _cal.sideTargetRightMm;
-    return (lErr - rErr) * 0.5f;
-  }
-  // When one wall disappears at an opening, do not suddenly give the remaining
-  // wall full control. That step change was a major source of left-right wobble.
-  if (lwall && _cal.sideTargetLeftMm) {
-    float e = ((float)s.mm[li] - _cal.sideTargetLeftMm) * 0.35f;
-    return constrain(e, -8.0f, 8.0f);
-  }
-  if (rwall && _cal.sideTargetRightMm) {
-    float e = -((float)s.mm[ri] - _cal.sideTargetRightMm) * 0.35f;
-    return constrain(e, -8.0f, 8.0f);
-  }
-  return 0.0f;
+    // Only use fresh side ToF readings.
+    bool leftFresh = tofFresh(s, li, now);
+    bool rightFresh = tofFresh(s, ri, now);
+
+    bool lwall =
+        leftFresh &&
+        s.mm[li] < _cal.wallThresholdMm[li];
+
+    bool rwall =
+        rightFresh &&
+        s.mm[ri] < _cal.wallThresholdMm[ri];
+
+    // BOTH WALLS
+    if (lwall && rwall &&
+        _cal.sideTargetLeftMm > 0 &&
+        _cal.sideTargetRightMm > 0) {
+
+        float lErr =
+            (float)s.mm[li] -
+            (float)_cal.sideTargetLeftMm;
+
+        float rErr =
+            (float)s.mm[ri] -
+            (float)_cal.sideTargetRightMm;
+
+        float e = (lErr - rErr) * 0.5f;
+
+        // IMPORTANT: never allow a ToF/corner spike
+        // to create a huge steering command.
+        return constrain(e, -10.0f, 10.0f);
+    }
+
+    // LEFT WALL ONLY
+    if (lwall && _cal.sideTargetLeftMm > 0) {
+        float e =
+            ((float)s.mm[li] -
+             (float)_cal.sideTargetLeftMm) * 0.35f;
+
+        return constrain(e, -6.0f, 6.0f);
+    }
+
+    // RIGHT WALL ONLY
+    if (rwall && _cal.sideTargetRightMm > 0) {
+        float e =
+            -((float)s.mm[ri] -
+              (float)_cal.sideTargetRightMm) * 0.35f;
+
+        return constrain(e, -6.0f, 6.0f);
+    }
+
+    return 0.0f;
 }
 
 bool MotionController::driveDistanceMm(float distanceMm, int basePwm, bool useWallCentering,
@@ -129,6 +165,10 @@ bool MotionController::driveDistanceMm(float distanceMm, int basePwm, bool useWa
   timeoutMs = constrain(timeoutMs, 3000u, 20000u);
 
   bool success = false;
+  // If a trustworthy front wall proves that the robot has reached the physical
+  // centre earlier/later than encoder odometry predicts, stop there and let the
+  // front-align controller remove the remaining longitudinal/square error.
+  bool requestFrontAlignAfterMove = false;
   float lastProgressMm = 0.0f;
   uint32_t lastProgressMs = millis();
   uint8_t recoveryCount = 0;
@@ -235,7 +275,7 @@ bool MotionController::driveDistanceMm(float distanceMm, int basePwm, bool useWa
       frontAvg = bothFrontValid ? (uint16_t)((f1 + f2) / 2u) : min(f1, f2);
       // Docking/localization needs a coherent PAIR. One valid front sensor is
       // kept only for emergency collision protection.
-      bool frontLooksUsable = bothFrontValid && frontDiff <= 45u;
+      bool frontLooksUsable = bothFrontValid && frontDiff <= 20u;
       const uint32_t frontPairStamp = frontLooksUsable ? pairedFrontStamp(s) : 0;
 
       // Infer the real grid phase from the front wall whenever line-of-sight to a
@@ -301,9 +341,14 @@ bool MotionController::driveDistanceMm(float distanceMm, int basePwm, bool useWa
         }
       }
 
+      // A coherent front wall is a physical landmark.  Do NOT require 80% of
+      // encoder travel before trusting it: accumulated wheel/stop error can make
+      // the real cell centre arrive much earlier than 192 encoder-mm.  We still
+      // require some forward progress plus multiple NEW, agreeing ToF samples so
+      // a start-line/post reflection cannot instantly complete a cell.
       frontCandidate = collisionGuard && frontLooksUsable &&
                        frontAvg <= FRONT_DOCK_TRIGGER_MM &&
-                       avgMm >= target * 0.55f;
+                       avgMm >= target * 0.25f;
 
       if (frontPairStamp != 0 && frontPairStamp != lastFrontStamp) {
         lastFrontStamp = frontPairStamp;
@@ -317,21 +362,32 @@ bool MotionController::driveDistanceMm(float distanceMm, int basePwm, bool useWa
       frontReferenceActive = frontCandidate &&
                              frontNearSamples >= FRONT_REFERENCE_CONFIRM_SAMPLES;
 
-      // The desired physical cell position is reached.  This can happen slightly
-      // before OR after the nominal 192 mm encoder point, which removes accumulated
-      // longitudinal error whenever a front wall is available.
+      // IMPORTANT: a repeatable, coherent front wall can correct accumulated
+      // longitudinal odometry error.  If it reaches the front-align window after
+      // at least 1/4-cell of travel, stop immediately and align to the physical
+      // wall reference.  This is intentionally allowed even when encoder progress
+      // is only 70-100 mm; the wall is then telling us the robot was already ahead
+      // of the nominal encoder phase from previous cells.
+      //
+      // Because frontReferenceActive requires BOTH front sensors, <=20 mm pair
+      // disagreement, fresh samples, and repeated NEW samples, a one-off ToF spike
+      // cannot complete the cell.
       if (frontReferenceActive &&
-          frontAvg <= FRONT_TURN_TARGET_MM + FRONT_REFERENCE_TOL_MM) {
-        Serial.print("FRONT REFERENCE STOP: F=");
+          frontAvg <= FRONT_TURN_TARGET_MM + FRONT_ALIGN_TOL_MM) {
+        Serial.print("FRONT PHYSICAL-CENTER STOP: F=");
         Serial.print(frontAvg);
-        Serial.print(" mm, encoder=");
+        Serial.print(" diff=");
+        Serial.print(frontDiff);
+        Serial.print(" encoder=");
         Serial.print(avgMm, 1);
-        Serial.println(" mm");
+        Serial.println(" mm -> running front_align");
+        requestFrontAlignAfterMove = true;
         success = true;
         break;
       }
 
-      // Hard emergency protection for a suspiciously early obstacle.
+      // Hard emergency protection remains for ONE-SENSOR / incoherent close
+      // obstacles. A confirmed coherent pair is handled above as a wall landmark.
       if (collisionGuard && anyFrontValid && frontAvg < COLLISION_STOP_MM &&
           avgMm < target * 0.50f) {
         Serial.println("MOVE ABORT: emergency front collision guard triggered.");
@@ -441,6 +497,29 @@ bool MotionController::driveDistanceMm(float distanceMm, int basePwm, bool useWa
   }
 
   _motors.stop(true);
+
+  // A coherent front landmark is more valuable than accumulated wheel odometry.
+  // Finish the move by putting the chassis at the calibrated wall distance and
+  // square to the wall before DFS updates its logical cell.
+  if (success && requestFrontAlignAfterMove && !killed()) {
+    delay(70);  // let chassis + ToF readings settle before tiny corrections
+    const bool aligned =
+        alignFrontToWall(FRONT_TURN_TARGET_MM, FRONT_ALIGN_MAX_PWM);
+
+    if (!aligned) {
+      if (killed()) {
+        success = false;
+      } else {
+        // Do not throw away the whole DFS after a confirmed coherent wall stop.
+        // The robot is already safely stopped at the wall landmark; a later turn
+        // will get another chance to align.
+        Serial.println("FRONT CENTER ALIGN warning: could not settle; keeping physical wall stop.");
+      }
+    } else {
+      Serial.println("FRONT PHYSICAL-CENTER CORRECTION: COMPLETE");
+    }
+  }
+
   if (PID_TRACE_ENABLED) {
     Serial.printf("[PID DRIVE END] result=%s\n", (success && !killed()) ? "OK" : "FAIL");
   }
@@ -601,7 +680,7 @@ bool MotionController::driveAnchoredMazeCell(int basePwm, bool resetAnchor) {
     bool bothFront = (f1 < 8190 && f2 < 8190);
     uint16_t frontDiff = bothFront ? (uint16_t)abs((int)f1 - (int)f2) : 999u;
     uint16_t frontAvg = bothFront ? (uint16_t)((f1 + f2) / 2u) : min(f1, f2);
-    bool frontUsable = bothFront && frontDiff <= 45u;
+    bool frontUsable = bothFront && frontDiff <= 20u;
     const uint32_t frontPairStamp = frontUsable ? pairedFrontStamp(snap) : 0;
 
     // A single front sensor is never enough for maze docking, but it is enough
@@ -826,6 +905,7 @@ bool MotionController::alignFrontToWall(uint16_t targetMm, int maxPwm) {
   int leftSign = 0;
   int rightSign = 0;
   uint8_t previousFrontMask = 0;
+  uint8_t incoherentPairSamples = 0;
 
   // Buffer diagnostics during control; print only after stopping the motors.
   // This keeps serial output from stretching the small correction pulses.
@@ -893,9 +973,37 @@ bool MotionController::alignFrontToWall(uint16_t targetMm, int maxPwm) {
 
     float left = (float)correctedFrontMm(s, li, FRONT_LEFT_OFFSET_MM);
     float right = (float)correctedFrontMm(s, ri, FRONT_RIGHT_OFFSET_MM);
+
+    // Do not let one bad / diagonal / post reflection make the front-align PID
+    // rotate the robot aggressively. Require several consecutive incoherent
+    // fresh pairs before giving up, so a single ToF spike is ignored.
+    float pairDifference = fabsf(left - right);
+    if (pairDifference > 35.0f) {
+      _motors.stop(true);
+      stableSince = 0;
+      distancePid = AlignPid{};
+      squarePid = AlignPid{};
+      if (incoherentPairSamples < 10) ++incoherentPairSamples;
+
+      if (incoherentPairSamples >= 3) {
+        Serial.print("FRONT ALIGN SKIP: incoherent pair FL=");
+        Serial.print(left, 0);
+        Serial.print(" FR=");
+        Serial.print(right, 0);
+        Serial.print(" diff=");
+        Serial.println(pairDifference, 1);
+        Serial.println("[PID FRONT END] result=SKIP");
+        return false;
+      }
+
+      delay(2);
+      continue;
+    }
+    incoherentPairSamples = 0;
+
     float front = 0.5f * (left + right);
     float distErr = front - (float)targetMm; // + = too far -> move forward
-    float squareErr = (lv && rv) ? (left - right) : 0.0f;
+    float squareErr = left - right;
 
     bool distOk = fabsf(distErr) <= FRONT_ALIGN_TOL_MM;
     bool squareOk = !(lv && rv) || fabsf(squareErr) <= FRONT_SQUARE_TOL_MM;
@@ -1000,37 +1108,55 @@ bool MotionController::turnToHeading(Heading &current, Heading target, int maxPw
   // This prevents the robot from entering the turn while touching the wall or
   // while sitting several centimetres off the repeatable cell-centre position.
   if (delta != 0 && wallFront()) {
-    if (!alignFrontToWall(FRONT_TURN_TARGET_MM, FRONT_ALIGN_MAX_PWM)) {
-      Serial.println("TURN BLOCKED: front-wall alignment failed.");
+    const bool aligned =
+        alignFrontToWall(FRONT_TURN_TARGET_MM, FRONT_ALIGN_MAX_PWM);
+
+    if (!aligned) {
+      // Key2 / emergency stop must still abort the run.
+      if (killed()) {
+        _motors.stop(true);
+        return false;
+      }
+
+      // A bad ToF pair should not kill the entire DFS run. Stop, settle, and
+      // continue with the already-calibrated encoder-only pivot.
+      Serial.println("FRONT ALIGN unavailable -> continuing with encoder turn.");
       _motors.stop(true);
-      return false;
+      delay(100);
+    } else {
+      _motors.stop(true);
+      delay(180);
     }
-    _motors.stop(true);
-    delay(180);
   }
 
-  if (delta == 0) {
+ if (delta == 0) {
     ok = true;
-  } else if (delta == 1) {
-    // RIGHT 90 degrees.
+
+} else if (delta == 1) {
+    // RIGHT 90 degrees
     ok = turnEncoderTicks(-TURN_RIGHT_90_TICKS);
     if (ok) delay(250);
-  } else if (delta == 2) {
-    // 180 degrees: two fully stopped calibrated 90-degree pivots.
-    ok = turnEncoderTicks(TURN_LEFT_90_TICKS);
+
+} else if (delta == 2) {
+    // RIGHT 180 degrees
+    Serial.println("180 TURN RIGHT: 720 ticks");
+
+    ok = turnEncoderTicks(-720);
+
     if (ok) {
-      delay(350);
-      ok = turnEncoderTicks(TURN_LEFT_90_TICKS);
+        _motors.stop(true);
+        delay(350);
+        Serial.println("180 TURN COMPLETE");
     }
-    if (ok) delay(300);
-  } else if (delta == 3) {
-    // LEFT 90 degrees.
+
+} else if (delta == 3) {
+    // LEFT 90 degrees
     ok = turnEncoderTicks(TURN_LEFT_90_TICKS);
     if (ok) delay(250);
-  }
+}
 
-  if (ok) current = target;
-  return ok;
+if (ok) current = target;
+return ok;
 }
 
 } // namespace MM3

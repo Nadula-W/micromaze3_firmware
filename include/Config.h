@@ -87,8 +87,8 @@ constexpr int TURN_PWM = 105;
 // Calibrated on the real robot: encoder-only pivot is currently more reliable than MPU yaw.
 // Tune these independently with `turn_ticks <ticks>` (left) and
 // `turn_ticks -<ticks>` (right). Real drivetrains are asymmetric.
-constexpr int32_t TURN_LEFT_90_TICKS = 330;
-constexpr int32_t TURN_RIGHT_90_TICKS = 330;
+constexpr int32_t TURN_LEFT_90_TICKS = 345;
+constexpr int32_t TURN_RIGHT_90_TICKS = 345;
 constexpr int ENCODER_TURN_PWM = 68;
 constexpr int MIN_MOVE_PWM = 58;
 constexpr uint16_t COLLISION_STOP_MM = 24;
@@ -111,8 +111,8 @@ constexpr uint16_t FRONT_REFERENCE_CONFIRM_SAMPLES = 2;
 constexpr uint16_t FRONT_MAX_EXTRA_TRAVEL_MM = 90;
 constexpr uint16_t FRONT_REFERENCE_TOL_MM = 3;
 
-constexpr uint16_t FRONT_ALIGN_TOL_MM = 5;
-constexpr uint16_t FRONT_SQUARE_TOL_MM = 5;// stopped alignment: 65-95 mm at 80 mm target
+constexpr uint16_t FRONT_ALIGN_TOL_MM = 8;
+constexpr uint16_t FRONT_SQUARE_TOL_MM = 6;// stopped alignment: 65-95 mm at 80 mm target
 // Grid-phase localization from a visible wall.  At a true cell centre the front
 // sensor should read FRONT_TURN_TARGET_MM + N*CELL_MM.  While a cell move is in
 // progress we add encoder progress back to the live front reading to estimate

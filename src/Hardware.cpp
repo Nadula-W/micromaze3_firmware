@@ -132,33 +132,97 @@ bool ExternalEEPROM::readBytes(uint32_t address, uint8_t *data, size_t len) {
   return true;
 }
 
-bool ExternalEEPROM::writeBytes(uint32_t address, const uint8_t *data, size_t len) {
-  if (!_present || !_bus || address + len > 131072UL) return false;
+bool ExternalEEPROM::writeBytes(
+    uint32_t address,
+    const uint8_t *data,
+    size_t len) {
+
+  if (!_present || !_bus || address + len > 131072UL)
+    return false;
+
+  // LOW = EEPROM write enabled
   protect(false);
+
   size_t done = 0;
   bool ok = true;
+
   while (done < len) {
+
     uint32_t a = address + done;
     uint8_t dev = deviceFor(a);
     uint16_t wa = wordAddress(a);
+
     size_t blockRemain = 65536UL - wa;
     size_t pageRemain = 256UL - (wa & 0xFFu);
-    size_t chunk = len - done;
-    if (chunk > 28) chunk = 28;
-    if (chunk > pageRemain) chunk = pageRemain;
-    if (chunk > blockRemain) chunk = blockRemain;
 
-    _bus->beginTransmission(dev);
-    _bus->write((uint8_t)(wa >> 8));
-    _bus->write((uint8_t)(wa & 0xFF));
-    for (size_t i = 0; i < chunk; ++i) _bus->write(data[done + i]);
-    if (_bus->endTransmission() != 0 || !waitReady(dev)) {
+    size_t chunk = len - done;
+
+    // Use smaller chunks.
+    // The 16-byte EEPROM self-test is already proven reliable.
+    if (chunk > 16) chunk = 16;
+
+    if (chunk > pageRemain)
+      chunk = pageRemain;
+
+    if (chunk > blockRemain)
+      chunk = blockRemain;
+
+    bool chunkOk = false;
+
+    // Retry each EEPROM chunk up to 3 times
+    for (uint8_t attempt = 0;
+         attempt < 3 && !chunkOk;
+         ++attempt) {
+
+      _bus->beginTransmission(dev);
+
+      _bus->write((uint8_t)(wa >> 8));
+      _bus->write((uint8_t)(wa & 0xFF));
+
+      for (size_t i = 0; i < chunk; ++i) {
+        _bus->write(data[done + i]);
+      }
+
+      uint8_t txResult = _bus->endTransmission();
+
+      if (txResult == 0) {
+
+        // Give EEPROM more time for its internal write cycle
+        if (waitReady(dev, 50)) {
+          chunkOk = true;
+          break;
+        }
+      }
+
+      delay(5);
+    }
+
+    if (!chunkOk) {
+
+      Serial.print("EEPROM WRITE FAIL address=0x");
+      Serial.print(a, HEX);
+
+      Serial.print(" dev=0x");
+      Serial.print(dev, HEX);
+
+      Serial.print(" chunk=");
+      Serial.println(chunk);
+
       ok = false;
       break;
     }
+
     done += chunk;
   }
+
+  // Protect EEPROM again
   protect(true);
+
+  if (ok) {
+    Serial.print("EEPROM WRITE COMPLETE bytes=");
+    Serial.println(len);
+  }
+
   return ok;
 }
 
